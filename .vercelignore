@@ -1,0 +1,6 @@
+**/*.test.js
+**/*.test.jsx
+server/src/scripts/
+node_modules
+.env
+.env.local

@@ -1,0 +1,246 @@
+@import 'tailwindcss';
+
+/*
+ * Dark mode is driven by a `.dark` class on <html> rather than the media query
+ * alone, so an explicit choice can override the system setting. The class is
+ * set by an inline script in index.html before first paint.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Semantic surface colours, defined as plain CSS variables so they can be
+ * swapped wholesale for dark mode. Components use `bg-surface` / `text-fg` and
+ * so on, which means the theme lives here instead of being spread across
+ * hundreds of `dark:` variants.
+ */
+/*
+ * Light mode is warm — cream paper rather than clinical white, with browns
+ * instead of greys for text. The teal brand sits naturally on cream, and money
+ * figures read as ink on paper, which suits a bill-splitter.
+ */
+:root {
+  --surface: #fffdf7; /* cards, inputs, menus — warm off-white */
+  --surface-app: #f7f1e4; /* the page behind them — cream */
+  --surface-sunken: #f1e9d9; /* inset panels, pills */
+  --surface-hover: #f2ebdc;
+
+  --fg: #2e2721; /* warm near-black, not blue-grey */
+  --fg-muted: #6d6155;
+  --fg-subtle: #a1907e;
+
+  --line: #e4d9c5;
+  --line-soft: #efe6d5;
+
+  --accent-soft: #dff5ee;
+  --accent-soft-fg: #0c6b58;
+
+  --danger-soft: #fbeee9;
+  --danger-fg: #b23c1c;
+  --danger-line: #f0cabb;
+
+  --warn-soft: #fbf1d8;
+  --warn-fg: #8a6314;
+  --warn-line: #e3c477;
+
+  --scrim: rgb(46 39 33 / 0.45);
+  /* Switch knobs stay light in both themes — a dark knob on a dark track
+     disappears when the switch is off. */
+  --knob: #ffffff;
+
+  /* A deeper, warmer orange reads better on cream than the neon original. */
+  --owe: #cf4a1c;
+  --owed: #0c7d63;
+
+  color-scheme: light;
+}
+
+/*
+ * Dark mode is shades of black — neutral, no blue cast. The steps are small and
+ * deliberate: page, card, hover and border each move just enough to separate,
+ * which is what keeps a near-black interface legible rather than muddy.
+ */
+.dark {
+  --surface: #151515; /* cards sit just above the page */
+  --surface-app: #0a0a0a; /* near-black page */
+  --surface-sunken: #101010; /* inset panels read as recessed */
+  --surface-hover: #202020;
+
+  --fg: #ededed;
+  --fg-muted: #a0a0a0;
+  --fg-subtle: #6e6e6e;
+
+  --line: #282828;
+  --line-soft: #1d1d1d;
+
+  --accent-soft: #10302a;
+  --accent-soft-fg: #4fd0ae;
+
+  --danger-soft: #2b1512;
+  --danger-fg: #f08a6a;
+  --danger-line: #542218;
+
+  --warn-soft: #2a2113;
+  --warn-fg: #e8bc5c;
+  --warn-line: #6b5320;
+
+  --scrim: rgb(0 0 0 / 0.7);
+  --knob: #f5f5f5;
+
+  /* Lifted so they carry against black without glowing. */
+  --owe: #ff8a5c;
+  --owed: #3ecfab;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-brand-50: #eafaf6;
+  --color-brand-100: #cbf1e8;
+  --color-brand-200: #9ee5d6;
+  --color-brand-300: #63d5be;
+  --color-brand-400: #35c7a8;
+  --color-brand-500: #1cc29f;
+  --color-brand-600: #12a385;
+  --color-brand-700: #0f826b;
+  --color-brand-800: #0e6755;
+  --color-brand-900: #0d5446;
+
+  --color-owe: var(--owe);
+  --color-owed: var(--owed);
+  --color-scrim: var(--scrim);
+  --color-knob: var(--knob);
+
+  /* Semantic aliases, resolved from the variables above at runtime. */
+  --color-surface: var(--surface);
+  --color-app: var(--surface-app);
+  --color-sunken: var(--surface-sunken);
+  --color-hover: var(--surface-hover);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-soft-fg: var(--accent-soft-fg);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-fg: var(--danger-fg);
+  --color-danger-line: var(--danger-line);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-fg: var(--warn-fg);
+  --color-warn-line: var(--warn-line);
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-app text-fg antialiased;
+}
+
+/* Firefox needs the explicit property; the rest use the webkit pseudo-element. */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+@layer components {
+  /* Tailwind v4 can't @apply one custom component class inside another, so the
+     shared button base is repeated rather than composed. */
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost,
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold
+           transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-brand-500 text-white hover:bg-brand-600;
+  }
+  .btn-secondary {
+    @apply border border-line bg-surface text-fg hover:bg-hover;
+  }
+  .btn-ghost {
+    @apply text-fg-muted hover:bg-hover;
+  }
+  .btn-danger {
+    @apply border border-danger-line bg-surface text-danger-fg hover:bg-danger-soft;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg
+           outline-none transition placeholder:text-fg-subtle
+           focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20;
+  }
+  .label {
+    @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-fg-muted;
+  }
+  .card {
+    @apply rounded-xl border border-line bg-surface shadow-sm;
+  }
+
+  /*
+   * Dense inline actions — Settle, Edit, Remove and friends. Compact enough not
+   * to bloat a list row on a desktop, but a 24px button is a poor target for a
+   * thumb, so on touch devices they grow to a comfortable size.
+   */
+  .btn-compact {
+    @apply px-2.5 py-1 text-xs;
+    min-height: 1.75rem;
+  }
+
+  .chip-tap {
+    min-height: 1.75rem;
+  }
+
+  /* Square icon-only buttons: close, add, the ₹/% switch. */
+  .icon-btn {
+    @apply inline-flex items-center justify-center rounded-lg;
+    min-height: 1.75rem;
+    min-width: 1.75rem;
+  }
+}
+
+/*
+ * `pointer: coarse` is true for fingers and false for a mouse, so the desktop
+ * layout keeps its tighter spacing while phones and tablets get targets close
+ * to the 44px both Apple and Google recommend.
+ */
+@media (pointer: coarse) {
+  .btn-compact {
+    @apply px-3 py-2 text-sm;
+    min-height: 2.5rem;
+  }
+  .icon-btn {
+    min-height: 2.5rem;
+    min-width: 2.5rem;
+  }
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost,
+  .btn-danger {
+    min-height: 2.5rem;
+  }
+  .input {
+    min-height: 2.75rem;
+  }
+  /* Avatar chips ("who ate this") and inline text buttons are the two other
+     things people tap constantly. */
+  .chip-tap {
+    min-height: 2.25rem;
+    padding-right: 0.75rem;
+  }
+  .link-btn {
+    @apply py-2;
+  }
+  /* Switches (simplify-debts, pause a recurring bill) are only as tall as their
+     track, which is a small target for a thumb. */
+  button[role='switch'] {
+    min-height: 2.25rem;
+  }
+}
