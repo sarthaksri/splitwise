@@ -330,13 +330,14 @@ function BalancesTab({ report, loading, group, currentUserId, onToggleSimplify, 
 }
 
 /**
- * Payment history. Everyone in the group can edit or delete any payment —
- * the ledger is shared, so a mistyped amount skews everybody's balance and
- * anybody should be able to put it right.
+ * Payment history. Each row is just who-paid-whom and how much; tapping it
+ * opens the full record. Edit and Delete used to sit inline, which on a phone
+ * wrapped the row onto three lines and put two 28px targets next to each other
+ * — one of them destructive. They now live in the detail sheet, where there is
+ * room to label them and to confirm.
  */
 function PaymentList({ settlements, currentUserId, currency, onEdit }) {
-  const removePayment = useDeletePayment();
-  const [confirming, setConfirming] = useState(null);
+  const [detail, setDetail] = useState(null);
 
   if (settlements.length === 0) {
     return (
@@ -345,71 +346,187 @@ function PaymentList({ settlements, currentUserId, currency, onEdit }) {
       </EmptyState>
     );
   }
-  const nameOf = (u) => (String(u._id ?? u.id) === currentUserId ? 'You' : u.name);
+  const nameOf = (u) => (String(u?._id ?? u?.id) === currentUserId ? 'You' : u?.name ?? 'Someone');
 
   return (
-    <ul className="divide-y divide-line-soft">
-      {settlements.map((s) => (
-        <li key={s._id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-          <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-base">
-            💸
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm text-fg">
-              <b>{nameOf(s.from)}</b> paid <b>{nameOf(s.to)}</b>
-            </p>
-            <p className="text-xs text-fg-subtle">
-              {new Date(s.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
-              {s.note ? ` · ${s.note}` : ''}
-            </p>
-          </div>
-          <span className="font-semibold tabular-nums text-fg">
-            {formatMoney(s.amountCents, currency)}
-          </span>
+    <>
+      <ul className="divide-y divide-line-soft">
+        {settlements.map((s) => (
+          <li key={s._id}>
+            <button
+              type="button"
+              onClick={() => setDetail(s)}
+              className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-hover"
+            >
+              <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-base">
+                💸
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm text-fg">
+                  <b>{nameOf(s.from)}</b> paid <b>{nameOf(s.to)}</b>
+                </p>
+                <p className="truncate text-xs text-fg-subtle">
+                  {new Date(s.date).toLocaleDateString(undefined, {
+                    day: 'numeric',
+                    month: 'short',
+                  })}
+                  {s.note ? ` · ${s.note}` : ''}
+                </p>
+              </div>
+              <span className="shrink-0 font-semibold tabular-nums text-fg">
+                {formatMoney(s.amountCents, currency)}
+              </span>
+              <svg
+                className="size-4 shrink-0 text-fg-subtle"
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden="true"
+              >
+                <path d="M7 4l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </li>
+        ))}
+      </ul>
 
-          {confirming === s._id ? (
-            <span className="flex items-center gap-1.5">
-              <span className="text-xs text-fg-muted">Delete?</span>
-              <button
-                type="button"
-                className="btn-ghost btn-compact"
-                onClick={() => setConfirming(null)}
-              >
-                Keep
-              </button>
-              <button
-                type="button"
-                className="btn-danger btn-compact"
-                disabled={removePayment.isPending}
-                onClick={async () => {
-                  await removePayment.mutateAsync(s._id);
-                  setConfirming(null);
-                }}
-              >
+      <PaymentDetail
+        payment={detail}
+        currency={currency}
+        currentUserId={currentUserId}
+        onClose={() => setDetail(null)}
+        onEdit={() => {
+          const target = detail;
+          setDetail(null);
+          onEdit?.(target);
+        }}
+      />
+    </>
+  );
+}
+
+/** The whole record of one payment, with the actions that change it. */
+function PaymentDetail({ payment, currency, currentUserId, onClose, onEdit }) {
+  const removePayment = useDeletePayment();
+  const [confirming, setConfirming] = useState(false);
+
+  // Reset the confirm step whenever a different payment is opened, so a sheet
+  // never appears already asking "delete?".
+  useEffect(() => {
+    if (payment) setConfirming(false);
+  }, [payment]);
+
+  if (!payment) return null;
+
+  const nameOf = (u) => (String(u?._id ?? u?.id) === currentUserId ? 'You' : u?.name ?? 'Someone');
+  const recordedBy = payment.createdBy;
+
+  return (
+    <Modal open onClose={onClose} title="Payment">
+      <div className="space-y-5 p-5">
+        <div className="text-center">
+          <p className="text-3xl font-bold tabular-nums text-fg">
+            {formatMoney(payment.amountCents, currency)}
+          </p>
+          <p className="mt-0.5 text-sm text-fg-subtle">
+            {new Date(payment.date).toLocaleDateString(undefined, {
+              weekday: 'short',
+              day: 'numeric',
+              month: 'long',
+              year: 'numeric',
+            })}
+          </p>
+        </div>
+
+        {/* From → to, stacked wide enough to read at a glance on a phone. */}
+        <div className="flex items-center justify-center gap-3 rounded-xl border border-line p-3">
+          <div className="flex min-w-0 flex-1 flex-col items-center gap-1.5 text-center">
+            <Avatar user={payment.from} size={40} />
+            <span className="min-w-0 truncate text-sm font-semibold text-fg">
+              {nameOf(payment.from)}
+            </span>
+            <span className="text-[10px] font-medium uppercase tracking-wide text-fg-subtle">
+              paid
+            </span>
+          </div>
+          <svg
+            className="size-5 shrink-0 text-fg-subtle"
+            viewBox="0 0 20 20"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-hidden="true"
+          >
+            <path d="M3 10h13M11 5l5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <div className="flex min-w-0 flex-1 flex-col items-center gap-1.5 text-center">
+            <Avatar user={payment.to} size={40} />
+            <span className="min-w-0 truncate text-sm font-semibold text-fg">
+              {nameOf(payment.to)}
+            </span>
+            <span className="text-[10px] font-medium uppercase tracking-wide text-fg-subtle">
+              received
+            </span>
+          </div>
+        </div>
+
+        {payment.note && (
+          <section>
+            <h4 className="label">Note</h4>
+            <p className="text-sm text-fg-muted">{payment.note}</p>
+          </section>
+        )}
+
+        <p className="text-xs text-fg-subtle">
+          {recordedBy ? <>Recorded by {nameOf(recordedBy)}. </> : null}
+          This payment reduces what {nameOf(payment.from)}{' '}
+          {String(payment.from?._id ?? payment.from?.id) === currentUserId ? 'owe' : 'owes'}{' '}
+          {nameOf(payment.to)} by {formatMoney(payment.amountCents, currency)}.
+        </p>
+
+        <ErrorNote error={removePayment.error} />
+
+        <div className="flex justify-between gap-2 border-t border-line pt-3">
+          {confirming ? (
+            <>
+              <span className="self-center text-sm text-fg-muted">Delete this payment?</span>
+              <div className="flex gap-2">
+                <button type="button" className="btn-secondary" onClick={() => setConfirming(false)}>
+                  Keep
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  disabled={removePayment.isPending}
+                  onClick={async () => {
+                    try {
+                      await removePayment.mutateAsync(payment._id);
+                      onClose();
+                    } catch {
+                      // Left open on purpose: the ErrorNote above says what
+                      // went wrong and the payment is still there to retry.
+                      setConfirming(false);
+                    }
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <button type="button" className="btn-danger" onClick={() => setConfirming(true)}>
                 Delete
               </button>
-            </span>
-          ) : (
-            <span className="flex items-center gap-1">
-              <button
-                type="button"
-                className="btn-ghost btn-compact"
-                onClick={() => onEdit(s)}
-              >
+              <button type="button" className="btn-primary" onClick={onEdit}>
                 Edit
               </button>
-              <button
-                type="button"
-                className="btn-ghost btn-compact text-danger-fg hover:bg-danger-soft"
-                onClick={() => setConfirming(s._id)}
-              >
-                Delete
-              </button>
-            </span>
+            </>
           )}
-        </li>
-      ))}
-    </ul>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

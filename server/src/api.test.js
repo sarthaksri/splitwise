@@ -911,4 +911,110 @@ describe('dashboard', () => {
     expect(theirs.body.iOweCents).toBe(10000);
     expect(theirs.body.netTotalCents).toBe(-10000);
   });
+
+  /**
+   * A settled group must leave nothing behind on the dashboard.
+   *
+   * Aditi covers Bhavna, Bhavna covers Chirag, so the simplified answer is the
+   * single payment Chirag → Aditi. Once that's paid the group is square — but a
+   * pairwise reading still sees Bhavna→Aditi and Chirag→Bhavna, plus the
+   * reverse edge for the payment itself, and reports Aditi as both owed 5000
+   * and owing 5000 around the loop.
+   */
+  it('drops a group from the friend list once its simplified debt is paid', async () => {
+    const aditi = await signUp('Aditi');
+    const bhavna = await signUp('Bhavna');
+    const chirag = await signUp('Chirag');
+    const { body } = await aditi.agent
+      .post('/api/groups')
+      .send({ name: 'Chain', memberIds: [bhavna.user.id, chirag.user.id] });
+    const group = body.group._id;
+    expect(body.group.simplifyDebts).toBe(true);
+
+    await aditi.agent.post('/api/expenses').send({
+      group,
+      description: 'Cab',
+      amountCents: 10000,
+      splitType: 'EQUAL',
+      participants: [aditi.user.id, bhavna.user.id],
+      paidBy: [{ userId: aditi.user.id, amountCents: 10000 }],
+    });
+    await bhavna.agent.post('/api/expenses').send({
+      group,
+      description: 'Lunch',
+      amountCents: 10000,
+      splitType: 'EQUAL',
+      participants: [bhavna.user.id, chirag.user.id],
+      paidBy: [{ userId: bhavna.user.id, amountCents: 10000 }],
+    });
+
+    // The group offers exactly one payment, and it skips Bhavna entirely.
+    const balances = await aditi.agent.get(`/api/groups/${group}/balances`);
+    expect(balances.body.debts).toHaveLength(1);
+    expect(balances.body.debts[0]).toMatchObject({
+      from: chirag.user.id,
+      to: aditi.user.id,
+      amountCents: 5000,
+    });
+
+    const before = await aditi.agent.get('/api/dashboard/summary');
+    expect(before.body.friends).toHaveLength(1);
+    expect(before.body.friends[0].user.name).toBe('Chirag');
+    expect(before.body.friends[0].amountCents).toBe(5000);
+
+    await chirag.agent.post('/api/settlements').send({
+      group,
+      from: chirag.user.id,
+      to: aditi.user.id,
+      amountCents: 5000,
+    });
+
+    for (const person of [aditi, bhavna, chirag]) {
+      const after = await person.agent.get('/api/dashboard/summary');
+      expect(after.body.friends).toEqual([]);
+      expect(after.body.owedToMeCents).toBe(0);
+      expect(after.body.iOweCents).toBe(0);
+      expect(after.body.netTotalCents).toBe(0);
+      expect(after.body.groups[0].myBalanceCents).toBe(0);
+    }
+  });
+
+  it('still reads a group pairwise when simplify is switched off', async () => {
+    const aditi = await signUp('Aditi');
+    const bhavna = await signUp('Bhavna');
+    const chirag = await signUp('Chirag');
+    const { body } = await aditi.agent
+      .post('/api/groups')
+      .send({ name: 'Chain', memberIds: [bhavna.user.id, chirag.user.id] });
+    const group = body.group._id;
+    await aditi.agent.patch(`/api/groups/${group}`).send({ simplifyDebts: false });
+
+    await aditi.agent.post('/api/expenses').send({
+      group,
+      description: 'Cab',
+      amountCents: 10000,
+      splitType: 'EQUAL',
+      participants: [aditi.user.id, bhavna.user.id],
+      paidBy: [{ userId: aditi.user.id, amountCents: 10000 }],
+    });
+    await bhavna.agent.post('/api/expenses').send({
+      group,
+      description: 'Lunch',
+      amountCents: 10000,
+      splitType: 'EQUAL',
+      participants: [bhavna.user.id, chirag.user.id],
+      paidBy: [{ userId: bhavna.user.id, amountCents: 10000 }],
+    });
+
+    // Bhavna nets to zero but genuinely owes and is owed 5000, and with
+    // simplify off that is exactly what the dashboard should say.
+    const hers = await bhavna.agent.get('/api/dashboard/summary');
+    expect(hers.body.netTotalCents).toBe(0);
+    expect(hers.body.owedToMeCents).toBe(5000);
+    expect(hers.body.iOweCents).toBe(5000);
+    expect(hers.body.friends.map((f) => [f.user.name, f.amountCents])).toEqual([
+      ['Chirag', 5000],
+      ['Aditi', -5000],
+    ]);
+  });
 });

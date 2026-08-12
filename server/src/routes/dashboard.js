@@ -5,7 +5,7 @@ import { asyncHandler } from '../middleware/error.js';
 import { requireAuth } from '../middleware/auth.js';
 import { catchUpRecurring } from '../middleware/recurring.js';
 import { loadScope } from '../lib/ledger.js';
-import { netBalances, pairwiseDebts } from '../lib/balances.js';
+import { netBalances, pairwiseDebts, simplifyDebts } from '../lib/balances.js';
 import { addTo } from '../../../shared/money.js';
 
 const router = Router();
@@ -14,9 +14,17 @@ router.use(requireAuth);
 /**
  * The home screen: what you owe, what you're owed, and to whom.
  *
- * The per-person figures come from the pairwise view rather than the simplified
- * one — across group boundaries "you owe Rahul" should mean you genuinely
- * shared expenses with Rahul, not that an optimiser routed you through him.
+ * Each scope contributes the debts *that scope would show you*, so a group with
+ * "simplify debts" on is read simplified and one with it off is read pairwise.
+ * Reading everything pairwise regardless — which this used to do — leaves
+ * settled groups looking unsettled: pay off a simplified transfer and the
+ * original pairwise edges are all still there, joined by a reverse edge for the
+ * payment. You end up owing and being owed around a loop that nets to nothing,
+ * under a header that correctly says you are all settled up.
+ *
+ * The scopes are still summed rather than simplified together: across group
+ * boundaries "you owe Rahul" should mean you actually shared a group with
+ * Rahul, not that an optimiser routed you through him.
  */
 router.get(
   '/summary',
@@ -68,7 +76,14 @@ router.get(
         });
       }
 
-      for (const debt of pairwiseDebts(mine, mineSettlements)) {
+      // Mirrors the group's own balances tab. `simplifyDebts` works off the net
+      // positions, so a scope that nets to zero yields no debts at all — which
+      // is the whole point: once you've paid, the row disappears.
+      const debts = scope.group?.simplifyDebts
+        ? simplifyDebts(net)
+        : pairwiseDebts(mine, mineSettlements);
+
+      for (const debt of debts) {
         if (debt.from === me) addTo(perFriend, debt.to, -debt.amountCents);
         else if (debt.to === me) addTo(perFriend, debt.from, debt.amountCents);
       }

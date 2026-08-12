@@ -26,6 +26,9 @@ const settlementSchema = z.object({
 const POPULATE = [
   { path: 'from', select: 'name username email avatarColor' },
   { path: 'to', select: 'name username email avatarColor' },
+  // Anyone in the group can edit a payment, so the detail view needs to say who
+  // entered it — otherwise a corrected amount has no author.
+  { path: 'createdBy', select: 'name username avatarColor' },
 ];
 
 router.post(
