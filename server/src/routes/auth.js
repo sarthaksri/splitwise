@@ -29,10 +29,23 @@ const registerSchema = z.object({
   password: z.string().min(8, 'Use at least 8 characters').max(200),
 });
 
-const loginSchema = z.object({
-  email: z.string().trim().toLowerCase().email('Enter a valid email address'),
-  password: z.string().min(1, 'Enter your password'),
-});
+/**
+ * Sign in with either a username or an email address.
+ *
+ * `identifier` is the field the app sends; `email` is still accepted so an
+ * older client (or a bookmarked script) doesn't break.
+ */
+const loginSchema = z
+  .object({
+    identifier: z.string().trim().min(1).optional(),
+    email: z.string().trim().min(1).optional(),
+    password: z.string().min(1, 'Enter your password'),
+  })
+  .transform((d) => ({ ...d, identifier: d.identifier ?? d.email ?? '' }))
+  .refine((d) => d.identifier.length > 0, {
+    message: 'Enter your username or email',
+    path: ['identifier'],
+  });
 
 router.post(
   '/register',
@@ -65,11 +78,20 @@ router.post(
   authLimiter,
   validate(loginSchema),
   asyncHandler(async (req, res) => {
-    const { email, password } = req.body;
+    const { identifier, password } = req.body;
+
+    // An "@" that isn't the leading character means they typed an email;
+    // anything else is a username, with a leading @ tolerated.
+    const handle = identifier.toLowerCase();
+    const lookup =
+      handle.includes('@') && !handle.startsWith('@')
+        ? { email: handle }
+        : { username: handle.replace(/^@/, '') };
+
     // `isPlaceholder` guards against signing in as a stand-in. Their password is
     // random bytes nobody has, so this is belt and braces — but an account you
     // can't authenticate as shouldn't depend on that alone.
-    const user = await User.findOne({ email, isPlaceholder: { $ne: true } }).select(
+    const user = await User.findOne({ ...lookup, isPlaceholder: { $ne: true } }).select(
       '+passwordHash',
     );
 
@@ -81,7 +103,7 @@ router.post(
       ? await user.verifyPassword(password)
       : await User.burnPasswordComparison(password);
 
-    if (!ok) throw new ApiError(401, 'Incorrect email or password');
+    if (!ok) throw new ApiError(401, 'Incorrect username/email or password');
 
     setAuthCookie(res, signToken(user._id));
     res.json({ user: user.toPublic() });

@@ -66,7 +66,55 @@ describe('auth', () => {
       .post('/api/auth/login')
       .send({ email: 'aditi@example.com', password: 'wrongpassword' });
     expect(bad.status).toBe(401);
-    expect(bad.body.error).toBe('Incorrect email or password');
+    expect(bad.body.error).toBe('Incorrect username/email or password');
+  });
+
+  it('signs in with a username as well as an email', async () => {
+    await signUp('Aditi');
+
+    for (const [label, identifier] of [
+      ['username', 'aditi'],
+      ['@username', '@aditi'],
+      ['email', 'aditi@example.com'],
+      ['mixed case', 'ADITI'],
+      ['padded', '  aditi  '],
+    ]) {
+      const res = await request(app)
+        .post('/api/auth/login')
+        .send({ identifier, password: 'password123' });
+      expect(res.status, `${label} should sign in`).toBe(200);
+      expect(res.body.user.username).toBe('aditi');
+    }
+  });
+
+  it('still accepts the old `email` field, so older clients keep working', async () => {
+    await signUp('Aditi');
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'aditi@example.com', password: 'password123' });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a wrong password and an unknown handle the same way', async () => {
+    await signUp('Aditi');
+    const wrongPassword = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'aditi', password: 'nope' });
+    const noSuchUser = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'ghost', password: 'nope' });
+
+    expect(wrongPassword.status).toBe(401);
+    expect(noSuchUser.status).toBe(401);
+    // Identical text, so this can't be used to discover who has an account.
+    expect(wrongPassword.body.error).toBe(noSuchUser.body.error);
+    expect(wrongPassword.body.error).toMatch(/username\/email or password/);
+  });
+
+  it('asks for a handle when none is given', async () => {
+    const res = await request(app).post('/api/auth/login').send({ password: 'password123' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/username or email/i);
   });
 
   it('refuses short passwords and blocks anonymous access', async () => {

@@ -29,7 +29,7 @@ export function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [form, setForm] = useState({ email: '', password: '' });
+  const [form, setForm] = useState({ identifier: '', password: '' });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -38,7 +38,7 @@ export function Login() {
     setBusy(true);
     setError(null);
     try {
-      await login(form.email, form.password);
+      await login(form.identifier, form.password);
       navigate(location.state?.from ?? '/', { replace: true });
     } catch (err) {
       setError(err);
@@ -62,15 +62,20 @@ export function Login() {
     >
       <form onSubmit={onSubmit} className="space-y-4">
         <div>
-          <label className="label" htmlFor="email">Email</label>
+          <label className="label" htmlFor="email">Username or email</label>
+          {/* Deliberately type="text": type="email" makes the browser itself
+              reject a username before the form is ever submitted. */}
           <input
             id="email"
-            type="email"
+            type="text"
             required
-            autoComplete="email"
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck="false"
             className="input"
-            value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            placeholder="aditi or aditi@example.com"
+            value={form.identifier}
+            onChange={(e) => setForm({ ...form, identifier: e.target.value })}
           />
         </div>
         <div>

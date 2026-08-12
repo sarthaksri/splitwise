@@ -4,7 +4,7 @@
   "outputDirectory": "client/dist",
   "installCommand": "npm install",
   "functions": {
-    "api/[...path].js": {
+    "api/*.js": {
       "maxDuration": 15
     }
   },

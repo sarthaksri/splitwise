@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
@@ -60,7 +61,43 @@ export function createApp() {
   app.use(cookieParser());
   if (process.env.NODE_ENV !== 'test') app.use(morgan('dev'));
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true }));
+  /**
+   * Uptime probe. Deliberately mounted before the rate limiter so a monitor
+   * polling every 30s can't exhaust anyone's budget, and it takes no auth.
+   *
+   * It reports the database too: an API that answers while Mongo is unreachable
+   * is not actually up, and a monitor that only checks the process would stay
+   * green through a total outage. Reads the driver's connection state rather
+   * than issuing a query, so it stays cheap enough to poll often.
+   */
+  app.get('/api/health', async (_req, res) => {
+    const started = Date.now();
+    let db = 'down';
+    let ok = false;
+
+    try {
+      // An actual round trip, not `readyState`. That flag can sit on
+      // "connecting" while queries are being served perfectly well, so trusting
+      // it produces false alarms; a ping answers the only question that
+      // matters — will a query work right now?
+      await Promise.race([
+        mongoose.connection.db.admin().ping(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
+      ]);
+      db = 'up';
+      ok = true;
+    } catch (err) {
+      db = err.message === 'timeout' ? 'timeout' : 'down';
+    }
+
+    res.status(ok ? 200 : 503).json({
+      ok,
+      db,
+      dbLatencyMs: Date.now() - started,
+      uptimeSeconds: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   app.use('/api', apiLimiter);
   app.use('/api/auth', authRoutes);

@@ -28,8 +28,14 @@ function loginKey(req, res) {
   // ipKeyGenerator normalises IPv6 into a /64 subnet; skipping it would let an
   // attacker rotate through addresses in a range they already control.
   const ip = ipKeyGenerator(req, res);
-  const email = String(req.body?.email ?? '').trim().toLowerCase().slice(0, 120);
-  return `${ip}:${email}`;
+  // Whatever they typed — username or email. This runs before validation, so
+  // read both keys rather than assuming the normalised one exists.
+  const who = String(req.body?.identifier ?? req.body?.email ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/^@/, '')
+    .slice(0, 120);
+  return `${ip}:${who}`;
 }
 
 /**
