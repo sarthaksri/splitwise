@@ -126,6 +126,51 @@ describe('auth', () => {
   });
 });
 
+describe('CORS', () => {
+  // Regression: production rejected its own login form. Browsers send Origin on
+  // same-origin POSTs too, and the allowlist only knew about localhost.
+  it('accepts a same-origin request on any host, with no configuration', async () => {
+    for (const host of ['splitwise.sarthaksri.xyz', 'my-app-git-abc.vercel.app']) {
+      const res = await request(app)
+        .post('/api/auth/login')
+        .set('Origin', `https://${host}`)
+        .set('X-Forwarded-Host', host)
+        .send({ identifier: 'nobody', password: 'password123' });
+
+      // 401 = it reached the login handler. 500 would mean CORS threw.
+      expect(res.status, `${host} should reach the app`).toBe(401);
+      expect(res.headers['access-control-allow-origin']).toBe(`https://${host}`);
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    }
+  });
+
+  it('still allows the configured dev origin across ports', async () => {
+    const res = await request(app)
+      .get('/api/health')
+      .set('Origin', 'http://localhost:5173')
+      .set('Host', 'localhost:5000');
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+  });
+
+  it('refuses a hostile origin by withholding the header, not by erroring', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .set('Origin', 'https://evil.example')
+      .set('X-Forwarded-Host', 'splitwise.sarthaksri.xyz')
+      .send({ identifier: 'nobody', password: 'password123' });
+
+    // No CORS header means the browser blocks reading the response, which is
+    // the correct outcome — and not a 500.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.status).not.toBe(500);
+  });
+
+  it('allows requests with no Origin at all (curl, uptime probes)', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.status).toBe(200);
+  });
+});
+
 describe('usernames', () => {
   it('gives every account a handle and returns it with the user', async () => {
     const { user } = await signUp('Aditi');

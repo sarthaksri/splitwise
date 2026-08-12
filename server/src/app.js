@@ -35,28 +35,55 @@ export function createApp() {
   );
   app.disable('x-powered-by');
 
-  // On Vercel the API and the app share an origin, so the browser sends no
-  // Origin header and CORS never applies. In development they're on different
-  // ports, so the Vite origin has to be allowed explicitly — with credentials,
-  // which rules out the "*" wildcard.
+  // Vercel terminates TLS upstream; without this Express sees http and would
+  // refuse to set the `secure` auth cookie. Set before anything that inspects
+  // the request's origin or protocol.
+  app.set('trust proxy', 1);
+
+  /*
+   * CORS.
+   *
+   * Same-origin requests are worked out from the request itself rather than
+   * from configuration. Browsers send an `Origin` header on same-origin POSTs
+   * too — not only cross-origin ones — so a deployment where the app and API
+   * share a domain still goes through this check. Assuming otherwise is what
+   * made production reject its own login form.
+   *
+   * Deriving it also means preview deployments and custom domains work with no
+   * environment variable to keep in sync. CLIENT_ORIGIN stays for genuinely
+   * cross-origin callers, such as the Vite dev server on another port.
+   */
   const allowed = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean);
 
   app.use(
-    cors({
-      origin(origin, cb) {
-        if (!origin || allowed.includes(origin)) return cb(null, true);
-        return cb(new Error(`Origin ${origin} is not allowed`));
-      },
-      credentials: true,
+    cors((req, cb) => {
+      const origin = req.headers.origin;
+
+      // No Origin at all: curl, a health probe, a same-origin GET.
+      if (!origin) return cb(null, { origin: true, credentials: true });
+
+      // Behind Vercel's proxy `host` is the internal name, so prefer the
+      // forwarded one — otherwise same-origin never matches in production.
+      const host = req.headers['x-forwarded-host'] ?? req.headers.host;
+      let sameOrigin = false;
+      try {
+        sameOrigin = new URL(origin).host === host;
+      } catch {
+        sameOrigin = false;
+      }
+
+      // Refuse by omitting the CORS headers, which is what lets the browser
+      // block it. Throwing here turns a routine rejection into a 500.
+      return cb(null, {
+        origin: sameOrigin || allowed.includes(origin),
+        credentials: true,
+      });
     }),
   );
 
-  // Vercel terminates TLS upstream; without this Express sees http and would
-  // refuse to set the `secure` auth cookie.
-  app.set('trust proxy', 1);
   app.use(express.json({ limit: '256kb' }));
   app.use(cookieParser());
   if (process.env.NODE_ENV !== 'test') app.use(morgan('dev'));
