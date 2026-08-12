@@ -1,6 +1,13 @@
 /**
  * Vercel serverless entrypoint.
  *
+ * One plain function, with `vercel.json` rewriting every `/api/*` request to
+ * it. The obvious-looking alternative — a catch-all filename like
+ * `api/[...path].js` — does not work under a custom `buildCommand`: Vercel
+ * reads it as a single dynamic segment literally named `...path`, so `/api/x`
+ * reaches the function but `/api/auth/login` returns the platform's own 404.
+ * A rewrite has no such subtlety and keeps the original URL intact.
+ *
  * Vercel runs this file as a function and hands it the raw Node request, so we
  * just pass it to the same Express app the local server uses — one codebase,
  * no second implementation to keep in sync.
