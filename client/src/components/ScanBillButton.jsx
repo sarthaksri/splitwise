@@ -15,7 +15,7 @@ export function ScanBillButton({ onScanned, disabled }) {
   const inputRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [engine, setEngine] = useState(null);
+  const [stage, setStage] = useState(null);
   const [error, setError] = useState(null);
 
   async function handleFile(event) {
@@ -26,19 +26,26 @@ export function ScanBillButton({ onScanned, disabled }) {
 
     setBusy(true);
     setError(null);
-    setEngine(null);
+    setStage(null);
     setProgress(0);
 
     try {
-      const result = await scanReceipt(file, { onProgress: setProgress, onEngine: setEngine });
+      const result = await scanReceipt(file, { onProgress: setProgress, onStage: setStage });
       onScanned(result);
     } catch (err) {
       setError(err.message ?? 'That scan failed. Try again, or add the dishes by hand.');
     } finally {
       setBusy(false);
       setProgress(0);
+      setStage(null);
     }
   }
+
+  const STAGE_LABEL = {
+    reading: 'Reading the bill…',
+    structuring: 'Working out the dishes…',
+    local: 'Working out the dishes…',
+  };
 
   return (
     <div>
@@ -62,7 +69,7 @@ export function ScanBillButton({ onScanned, disabled }) {
         {busy ? (
           <span className="flex items-center justify-center gap-2">
             <span className="inline-block size-4 animate-spin rounded-full border-2 border-line border-t-brand-500" />
-            {engine === 'tesseract' ? 'Reading on your phone…' : 'Reading the bill…'}
+            {STAGE_LABEL[stage] ?? 'Reading the bill…'}
           </span>
         ) : (
           <span className="flex items-center justify-center gap-2">
@@ -84,11 +91,10 @@ export function ScanBillButton({ onScanned, disabled }) {
         </div>
       )}
 
-      {busy && engine === 'tesseract' && (
+      {busy && stage === 'reading' && (
         <p className="mt-1.5 text-xs text-fg-subtle">
-          Reading it here on your device, so the photo is never uploaded. The first scan
-          downloads the recogniser, so it takes a few seconds — and it&apos;s rougher than
-          the online reader, so check the rows carefully.
+          The photo is read here on your device and never uploaded. The first scan
+          downloads the recogniser, so give it a few seconds.
         </p>
       )}
 

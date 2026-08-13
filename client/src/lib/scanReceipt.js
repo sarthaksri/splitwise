@@ -1,13 +1,26 @@
 /**
- * Reading a bill, by whichever engine is available.
+ * Reading a bill: OCR here, sense-making there.
  *
- * The server is asked first. If it has a Gemini key it does the work and
- * returns structured dishes. If it doesn't — or the call failed upstream — it
- * says `fallback: 'tesseract'` and we do it here in the browser instead.
+ * The photo is recognised on the device with Tesseract, and only the resulting
+ * text is sent to the server, where Gemini turns it into dishes, quantities and
+ * taxes. If there's no key — or Gemini is unavailable — the same text is parsed
+ * locally by the heuristics in `shared/receipt.js` and the app still works.
  *
- * That ordering is deliberate. Gemini is markedly better at a crumpled photo of
- * a thermal bill, but Tesseract needs no key, no account and no network, so
- * anyone who clones this repo gets a working scanner out of the box.
+ * Splitting it this way matters:
+ *
+ *   The photograph never leaves the phone. A bill carries card digits and a
+ *   record of where somebody was on a Friday night, and none of that is needed
+ *   to work out who owes what.
+ *
+ *   Text requests actually succeed. Google's free tier is routinely saturated
+ *   for images — measured 503s took between 18 and 306 seconds — while text
+ *   answers in under two.
+ *
+ *   A few hundred tokens instead of a few thousand, so a small free allowance
+ *   stretches much further.
+ *
+ *   Layout stops being my problem. Bills differ wildly, and a language model
+ *   reading collapsed OCR columns handles shapes no regex of mine anticipated.
  */
 
 import { api } from '../api/client.js';
@@ -15,63 +28,71 @@ import { normalizeScan, parseReceiptText, reconcileScan } from '@shared/receipt.
 import { prepareImage } from './imagePrep.js';
 
 /**
- * Run OCR in the browser.
+ * Recognise the photo.
  *
- * Imported dynamically: tesseract.js pulls several megabytes of WASM and
- * language data, and most sessions never scan anything. A static import would
- * make every user pay for it on first load.
+ * tesseract.js is imported dynamically: it pulls several megabytes of WASM and
+ * language data, and most sessions never scan anything, so a static import
+ * would make every visitor pay for it on first load.
  */
-async function withTesseract(blob, onProgress) {
+async function readText(blob, onProgress) {
   const { default: Tesseract } = await import('tesseract.js');
   const { data } = await Tesseract.recognize(blob, 'eng', {
     logger: (m) => {
-      if (m.status === 'recognizing text') onProgress?.(0.4 + m.progress * 0.6);
+      if (m.status === 'recognizing text') onProgress?.(0.15 + m.progress * 0.6);
     },
   });
-  return data.text;
+  return data.text ?? '';
 }
 
 /**
  * @param {File|Blob} file the photo
- * @param {{onProgress?: (fraction: number) => void, onEngine?: (name: string) => void}} [hooks]
- * @returns {Promise<{scan: object, reconcile: object, provider: string}>}
+ * @param {{onProgress?: (fraction: number) => void, onStage?: (stage: string) => void}} [hooks]
+ * @returns {Promise<{scan: object, reconcile: object, provider: string, reason?: string}>}
  */
-export async function scanReceipt(file, { onProgress, onEngine } = {}) {
+export async function scanReceipt(file, { onProgress, onStage } = {}) {
+  onStage?.('reading');
   onProgress?.(0.05);
-  const { imageBase64, mimeType } = await prepareImage(file);
-  onProgress?.(0.2);
+
+  // Rotated upright and scaled down — OCR reads a sideways bill as nothing, and
+  // a 12-megapixel original is slow without being any more legible.
+  const image = await prepareImage(file);
+  const text = await readText(image, onProgress);
+
+  if (text.trim().length < 8) {
+    throw new Error(
+      "Couldn't read any text on that photo. Try again with more light, or hold the bill flat.",
+    );
+  }
+
+  onStage?.('structuring');
+  onProgress?.(0.8);
 
   let result = null;
   try {
-    result = await api.post('/expenses/scan', { imageBase64, mimeType });
+    result = await api.post('/expenses/scan', { text });
   } catch (err) {
-    // A 422 means the server read the photo and genuinely found no dishes on
-    // it. Retrying locally with a weaker engine would only waste the user's
-    // time to reach the same answer, so that one is passed straight through.
+    // A 422 means the text was read and genuinely has no food on it. The local
+    // parser works from the same characters and would agree, so don't waste the
+    // user's time reaching the same answer twice.
     if (err.status === 422) throw err;
-    // Anything else — offline, rate limited, a 500 — is worth trying locally.
-    result = { fallback: 'tesseract' };
+    result = { fallback: 'local' };
   }
 
   if (result?.provider === 'gemini') {
-    onEngine?.('gemini');
     onProgress?.(1);
     return { ...result, provider: 'gemini' };
   }
 
-  onEngine?.('tesseract');
-  onProgress?.(0.35);
-  const text = await withTesseract(file, onProgress);
+  onStage?.('local');
   const scan = normalizeScan(parseReceiptText(text));
   onProgress?.(1);
   return {
     scan,
     reconcile: reconcileScan(scan),
-    provider: 'tesseract',
-    // 'no-key' means this is simply how the app is set up here; 'upstream'
-    // means the good reader was busy. Worth telling apart — the second is
-    // temporary, and a rough result deserves that explanation rather than
-    // leaving the app looking bad at its job.
+    provider: 'local',
+    // 'no-key' is just how this deployment is set up; 'upstream' and 'quota'
+    // are temporary and worth saying, or a rougher result looks like the best
+    // the app can do.
     reason: result?.reason ?? 'upstream',
   };
 }

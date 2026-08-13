@@ -1,15 +1,28 @@
 /**
- * Reading a receipt with Gemini.
+ * Turning the raw text of a receipt into a structured bill.
  *
- * Google's free tier needs only an API key from aistudio.google.com — no card,
- * no billing account — which is why it's the default engine here. When no key
- * is configured the caller falls back to on-device Tesseract instead, so the
- * app works for anyone who clones it.
+ * The image is *not* sent here. Tesseract reads the photo in the browser and
+ * only its text comes to the server, which is better on three counts:
  *
- * Structured output is the whole point: `responseSchema` makes the model return
- * JSON matching `SCAN_SCHEMA` rather than prose we'd have to parse. That
- * removes an entire class of "the model explained the bill instead of listing
- * it" failures.
+ *   It works. Google's free tier is routinely saturated for image requests —
+ *   measured 503s took between 18 and 306 seconds — while text comes back in
+ *   under two seconds. The rate-limit dashboard calls these "text-out models"
+ *   for a reason.
+ *
+ *   It's cheap. A bill's text is a few hundred tokens against a few thousand
+ *   for the picture, so a small free allowance goes several times further.
+ *
+ *   It's private. The photograph of your table, your card digits and where you
+ *   were on a Friday night never leaves the device.
+ *
+ * What it costs: the model sees what OCR *thought* it read, so it cannot undo a
+ * misread digit by looking at the paper again. It can, however, notice that the
+ * lines do not add up to the printed total and say so — which is why the prompt
+ * below asks it to check exactly that.
+ *
+ * Structured output does the rest: `responseSchema` makes the reply JSON
+ * matching `SCAN_SCHEMA`, so there is no prose to parse and no "the model
+ * explained the bill instead of listing it" failure mode.
  */
 
 import { SCAN_SCHEMA } from '../../../shared/receipt.js';
@@ -64,37 +77,66 @@ export class GeminiUnavailable extends Error {
 
 export const hasGeminiKey = () => Boolean(process.env.GEMINI_API_KEY);
 
-const PROMPT = `You are reading a photograph of a restaurant or shop bill.
+const PROMPT = `You are given the raw OCR text of a restaurant or shop bill. Turn it
+into structured JSON.
 
-Extract every ordered line item with its name, quantity and price, plus the
-summary amounts. Rules:
+The text came from OCR, so expect it to be messy: columns collapsed into
+spaces, a dish name on one line with its figures on the next, characters
+confused (O for 0, l or I for 1, S for 5, rn for m), and header, footer and tax
+registration lines mixed in among the food. Layouts vary wildly between
+restaurants — do not assume any fixed column order.
 
-- "price" is the amount printed on that line, in major currency units (e.g.
-  320.00 means three hundred and twenty rupees). If the line shows a per-unit
-  price and a line total, use the LINE TOTAL and set qty to 1, so quantity is
-  never applied twice.
-- Do not include subtotals, taxes, tips, discounts, rounding or the grand total
-  as items. They belong in the dedicated fields.
-- Combine CGST, SGST, IGST, VAT and any service tax into a single "tax" total.
-- "tip" covers service charge and gratuity. "other" covers delivery, packing
-  and container charges. Round-off goes in "other" and may be negative only if
-  the bill shows it as a deduction — otherwise omit it.
-- "discount" is a positive number meaning the amount taken off.
-- "total" is the final amount payable as printed.
-- Omit any field the bill does not show. Never guess a number that is not
-  legible; leave it out instead.`;
+ITEMS
+
+- Return one entry per ordered line item, with "name", "qty" and "price".
+- "price" is the price of ONE unit, in major currency units (320.00 = three
+  hundred and twenty rupees), and "qty" is how many were ordered.
+- Bills commonly print three columns: Qty, Rate, Amount — where Amount is
+  already Qty x Rate. In that case use the RATE as "price" and the printed
+  quantity as "qty". Never take Amount as the unit price, or the bill doubles.
+- If a line shows only one figure, that figure is the price and qty is 1.
+- Keep the dish name as printed, without the serial number in front of it.
+- Do NOT return subtotals, taxes, service charges, discounts, rounding, the
+  grand total, item counts, HSN/SAC codes, GSTIN, FSSAI, bill or table numbers,
+  or KOT numbers as items. They are not food.
+
+SUMMARY FIELDS
+
+- "tax": every tax on the bill ADDED TOGETHER — CGST plus SGST plus IGST, VAT,
+  cess, service tax. Indian bills split this across two or more lines and the
+  total of them is what matters.
+- "tip": service charge or gratuity.
+- "other": delivery, packing, container or convenience charges.
+- "discount": a positive number meaning the amount taken OFF the bill. A
+  negative round-off (e.g. "Round Off -0.30") is a discount of 0.30.
+- "total": the final amount payable. If the bill prints both a subtotal and a
+  net or grand total, "total" is the LARGER, final one.
+- Omit any field the bill does not show. Do not invent numbers.
+
+CHECK YOUR WORK
+
+The items, taxes and charges should reconcile:
+
+    sum(qty x price) + tax + tip + other - discount = total
+
+Before answering, do that arithmetic. If it does not match the printed total,
+you have most likely misread a quantity, missed a line, or taken a line total
+as a unit price — re-read the text and correct it. If it still does not match,
+return what you can actually see rather than adjusting a number to force the
+sum: the app shows the user any discrepancy, and an honest gap is far more
+useful than a fabricated match.`;
 
 /**
- * @param {{imageBase64: string, mimeType: string}} input
+ * @param {{text: string}} input the OCR text of one bill
  * @returns {Promise<object>} a raw scan for `normalizeScan`
  * @throws {GeminiUnavailable}
  */
-export async function extractReceipt({ imageBase64, mimeType }) {
+export async function structureReceipt({ text }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new GeminiUnavailable('no API key configured');
 
   const body = JSON.stringify({
-    contents: [{ parts: [{ text: PROMPT }, { inlineData: { mimeType, data: imageBase64 } }] }],
+    contents: [{ parts: [{ text: `${PROMPT}\n\n--- BILL TEXT ---\n${text}` }] }],
     generationConfig: {
       responseMimeType: 'application/json',
       responseSchema: SCAN_SCHEMA,

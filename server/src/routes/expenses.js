@@ -11,7 +11,7 @@ import { catchUpRecurring } from '../middleware/recurring.js';
 import { scanLimiter } from '../middleware/rateLimit.js';
 import { computeShares, normalizePayers, SPLIT_TYPE_LIST } from '../../../shared/splitEngine.js';
 import { normalizeScan, reconcileScan, ScanError } from '../../../shared/receipt.js';
-import { extractReceipt, GeminiUnavailable, hasGeminiKey } from '../lib/gemini.js';
+import { structureReceipt, GeminiUnavailable, hasGeminiKey } from '../lib/gemini.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -152,24 +152,21 @@ const POPULATE = [
 ];
 
 /**
- * Read a photographed bill into dish rows the form can be prefilled with.
+ * Turn the OCR text of a bill into dish rows the form can be prefilled with.
  *
- * Nothing is saved here. The response is a suggestion the user reviews and
- * edits before pressing "Add expense", which is what makes it acceptable for
- * OCR to be occasionally wrong — a bad read costs a correction, never a wrong
- * balance.
+ * The browser does the reading — Tesseract on the photo — and sends only the
+ * text it got. So the photograph never reaches this server, and a bill's card
+ * digits and the record of where somebody was on a Friday night stay on their
+ * phone. Nothing here is stored either way.
  *
- * The image is read and dropped. It is not written to the database, to disk or
- * to a log: a bill carries names, card digits and where somebody was on a given
- * evening, and none of that needs keeping to work out who owes what.
+ * Nothing is saved as an expense either. The response is a suggestion the user
+ * reviews and edits before pressing "Add expense", which is what makes it
+ * acceptable for OCR to be occasionally wrong — a bad read costs a correction,
+ * never a wrong balance.
  */
 const scanSchema = z.object({
-  // ~2.2M base64 characters ≈ 1.6MB of image, comfortably inside the 3mb body
-  // parser mounted for this path and Vercel's 4.5MB request cap.
-  imageBase64: z.string().min(64, 'That image is empty').max(2_200_000, 'That image is too large'),
-  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp'], {
-    message: 'Use a JPEG, PNG or WebP photo',
-  }),
+  // Far more than the longest bill; a guard against someone posting a novel.
+  text: z.string().trim().min(8, "That photo didn't have any readable text on it").max(20_000),
 });
 
 router.post(
@@ -180,23 +177,24 @@ router.post(
     /*
      * "No engine available here" is a routine branch, not a failure, so it
      * answers 200 with a flag rather than an error status. The browser then
-     * runs Tesseract locally. Returning 4xx/5xx would make a working fallback
-     * look like a broken app — the same mistake the CORS rejection made.
+     * parses the text itself with the heuristics in shared/receipt.js.
+     * Returning 4xx/5xx would make a working fallback look like a broken app —
+     * the same mistake the CORS rejection made.
      */
     if (!hasGeminiKey()) {
-      return res.json({ provider: null, fallback: 'tesseract', reason: 'no-key' });
+      return res.json({ provider: null, fallback: 'local', reason: 'no-key' });
     }
 
     try {
-      const raw = await extractReceipt(req.body);
-      const scan = normalizeScan(raw);
+      const scan = normalizeScan(await structureReceipt(req.body));
       return res.json({ provider: 'gemini', scan, reconcile: reconcileScan(scan) });
     } catch (err) {
       if (err instanceof GeminiUnavailable) {
-        // Log the reason, never the image.
         console.warn('[scan] gemini unavailable:', err.message);
-        return res.json({ provider: null, fallback: 'tesseract', reason: err.kind ?? 'upstream' });
+        return res.json({ provider: null, fallback: 'local', reason: err.kind ?? 'upstream' });
       }
+      // The model read the text and found no food on it. The local parser would
+      // reach the same conclusion from the same characters, so say so directly.
       if (err instanceof ScanError) throw new ApiError(422, err.message);
       throw err;
     }

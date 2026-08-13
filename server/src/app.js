@@ -84,16 +84,10 @@ export function createApp() {
     }),
   );
 
-  /*
-   * Receipt photos need far more room than any other request, so that one path
-   * gets its own parser mounted ahead of the global one. body-parser marks a
-   * request it has handled with `_body`, so the 256kb parser below then passes
-   * it straight through rather than re-reading a spent stream.
-   *
-   * Everything else stays at 256kb: a JSON expense is a few hundred bytes, and
-   * a small cap is one less thing to abuse.
-   */
-  app.use('/api/expenses/scan', express.json({ limit: '3mb' }));
+  // 256kb everywhere: a JSON expense is a few hundred bytes and a scanned
+  // bill's text a few thousand, so nothing legitimate comes close. Receipt
+  // photos are read in the browser and never uploaded, which is what let this
+  // go back to a single small limit.
   app.use(express.json({ limit: '256kb' }));
   app.use(cookieParser());
   if (process.env.NODE_ENV !== 'test') app.use(morgan('dev'));

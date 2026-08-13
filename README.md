@@ -266,18 +266,41 @@ owe ₹828.48 each — and the three add up to the bill exactly.
 
 ### Scanning a bill
 
-On the **By dish** tab, *Scan a bill* opens the rear camera. The photo is rotated using its
-EXIF flag (or OCR reads a sideways receipt as nothing), scaled to 1600px on the long edge,
-and read by whichever engine is available:
+On the **By dish** tab, *Scan a bill* opens the rear camera. The work is split in two:
 
-| | Engine | Needs | Quality |
-|---|---|---|---|
-| With `GEMINI_API_KEY` | Gemini, server-side | a free key, no card | good on crumpled thermal bills |
-| Without | Tesseract, in your browser | nothing at all | rough; expect to fix rows |
+```
+photo ──► browser: EXIF-rotate, scale to 2200px, Tesseract ──► raw text
+                                                                 │
+                    ┌────────────────────────────────────────────┘
+                    ▼
+   GEMINI_API_KEY?  ──yes──►  server: Gemini structures the text  ──►  dishes
+                    └──no───►  browser: heuristics in shared/receipt.js
+```
 
-The choice is automatic — the server answers `fallback: "tesseract"` when it has no key or
-the call fails, and the browser takes over. Deliberately a `200`, not an error: falling back
-is a normal outcome, and a working fallback shouldn't look like a broken app.
+**The photograph never leaves your device.** Only the text does, and only when a key is
+configured. A bill carries card digits and a record of where you were on a Friday night, and
+none of that is needed to work out who owes what.
+
+Recognising on the device and reasoning in the cloud is also the only combination that
+currently *works*, and it's much cheaper:
+
+| | Text (what this does) | Image (what it did first) |
+|---|---|---|
+| Latency | **2.1s**, measured end to end | 18–306s, then a 503 |
+| Tokens | a few hundred | a few thousand |
+| Layout handling | the model reads collapsed columns | the model sees the page |
+
+Bill layouts differ wildly between restaurants, and a language model reading the text copes
+with shapes no regex anticipates — a dish name on one line with its figures on the next, a
+Qty/Rate/Amount table, taxes split across CGST and SGST lines. The prompt asks it to check
+its own arithmetic against the printed total, and explicitly *not* to fudge a number to
+force the sum: an honest gap is more useful than a fabricated match, because the app shows
+you the gap.
+
+Without a key the same text goes through the heuristics in `shared/receipt.js`, which handle
+the common Indian POS formats and are covered by tests. The server answers
+`fallback: "local"` — a `200`, not an error, because falling back is a normal outcome and a
+working fallback shouldn't look like a broken app.
 
 Gemini is tried as a short chain — `gemini-3.1-flash-lite`, then `gemini-flash-latest` —
 with 8 seconds per model and 18 for the lot. Every part of that is a scar:
@@ -289,12 +312,12 @@ with 8 seconds per model and 18 for the lot. Every part of that is a scar:
 - **Two models, not five.** Each attempt spends a request from a small pot.
 - **A pinned model gets retired.** `gemini-2.5-flash` now answers 404 for new keys, which
   silently demoted every scan to the on-device reader.
-- **The free tier is often saturated for image requests**, and a saturated endpoint does not
-  refuse quickly — measured 503s took between 18 and 306 seconds. Waiting that out is worse
-  than not trying, so it bails and reads locally.
+- **Bail fast anyway.** Text is quick, but a saturated endpoint doesn't refuse quickly, and
+  waiting is worse than reading it locally.
 
-The panel says which reader ran and why: *"the online reader was busy"* or *"today's free
-online scans are used up"*, so a rough result is never mistaken for the best the app can do.
+The panel says which path ran and why: *"read on your device, tidied up online"*, or *"the
+online tidy-up was busy"*, or *"today's free online tidy-ups are used up"* — so a rougher
+result is never mistaken for the best the app can do.
 
 **The photo is never stored.** It's read and dropped — not written to the database, to disk
 or to a log. With Tesseract it never leaves the device at all.

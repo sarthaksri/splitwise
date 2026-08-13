@@ -764,10 +764,11 @@ describe('expenses and balances', () => {
 });
 
 describe('scanning a bill', () => {
-  // A one-pixel JPEG, long enough to clear the minimum-length guard. The
-  // upstream call is stubbed in every test, so the bytes are never looked at.
-  const IMAGE = 'x'.repeat(200);
-  const body = { imageBase64: IMAGE, mimeType: 'image/jpeg' };
+  // The OCR text of a bill, as the browser would send it. The upstream call is
+  // stubbed in every test, so the wording never actually reaches a model.
+  const body = {
+    text: ['1 Paneer Tikka 320.00', '2 Butter Naan 90.00', 'Grand Total 500.00'].join('\n'),
+  };
 
   let realFetch;
   beforeEach(() => {
@@ -803,7 +804,7 @@ describe('scanning a bill', () => {
 
     // Deliberately 200: falling back is a normal outcome, not an error.
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ provider: null, fallback: 'tesseract', reason: 'no-key' });
+    expect(res.body).toMatchObject({ provider: null, fallback: 'local', reason: 'no-key' });
   });
 
   it('returns dishes and extras in paise when Gemini answers', async () => {
@@ -849,7 +850,7 @@ describe('scanning a bill', () => {
     // 'quota', not the generic 'upstream': the free tier resetting tomorrow is
     // a different thing to tell someone than a capacity blip clearing in
     // minutes, and the panel says which.
-    expect(res.body).toMatchObject({ provider: null, fallback: 'tesseract', reason: 'quota' });
+    expect(res.body).toMatchObject({ provider: null, fallback: 'local', reason: 'quota' });
   });
 
   it('reports a busy upstream as temporary, not as spent quota', async () => {
@@ -857,7 +858,7 @@ describe('scanning a bill', () => {
     stubGemini({ ok: false, status: 503, text: async () => 'high demand' });
 
     const res = await agent.post('/api/expenses/scan').send(body);
-    expect(res.body).toMatchObject({ fallback: 'tesseract', reason: 'upstream' });
+    expect(res.body).toMatchObject({ fallback: 'local', reason: 'upstream' });
   });
 
   it('falls back when the model returns something that is not JSON', async () => {
@@ -868,7 +869,7 @@ describe('scanning a bill', () => {
     });
 
     const res = await agent.post('/api/expenses/scan').send(body);
-    expect(res.body.fallback).toBe('tesseract');
+    expect(res.body.fallback).toBe('local');
   });
 
   it('says so plainly when the photo has no dishes on it', async () => {
@@ -880,31 +881,36 @@ describe('scanning a bill', () => {
     expect(res.body.error).toMatch(/find any dishes/i);
   });
 
-  it('rejects anything that is not a photo, and anything too big', async () => {
+  it('rejects an empty read and refuses a novel', async () => {
     const { agent } = await signUp('Aditi');
 
-    const wrongType = await agent
-      .post('/api/expenses/scan')
-      .send({ imageBase64: IMAGE, mimeType: 'application/pdf' });
-    expect(wrongType.status).toBe(400);
+    const empty = await agent.post('/api/expenses/scan').send({ text: '  ' });
+    expect(empty.status).toBe(400);
 
-    const tooBig = await agent
-      .post('/api/expenses/scan')
-      .send({ imageBase64: 'x'.repeat(2_200_001), mimeType: 'image/jpeg' });
-    expect(tooBig.status).toBe(400);
+    const huge = await agent.post('/api/expenses/scan').send({ text: 'x'.repeat(20_001) });
+    expect(huge.status).toBe(400);
   });
 
-  it('accepts a photo far larger than the 256kb limit the rest of the API has', async () => {
+  it('sends the bill text to the model, and never a photograph', async () => {
     const { agent } = await signUp('Aditi');
-    geminiReturns({ items: [{ name: 'Thali', price: 250 }] });
+    process.env.GEMINI_API_KEY = 'test-key';
+    let sent;
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"items":[{"name":"X","price":1}]}' }] } }],
+        }),
+      };
+    };
 
-    // ~1.5MB of base64: rejected outright if the scan path shares the global
-    // body limit, which is exactly the regression this guards.
-    const res = await agent
-      .post('/api/expenses/scan')
-      .send({ imageBase64: 'x'.repeat(1_500_000), mimeType: 'image/jpeg' });
-    expect(res.status).toBe(200);
-    expect(res.body.provider).toBe('gemini');
+    await agent.post('/api/expenses/scan').send(body);
+    const parts = sent.contents[0].parts;
+    // No inlineData anywhere: the image stays on the device, which is half the
+    // reason for doing OCR in the browser.
+    expect(parts.some((p) => p.inlineData)).toBe(false);
+    expect(parts[0].text).toContain('Paneer Tikka');
   });
 
   it('never sends the API key in the URL', async () => {

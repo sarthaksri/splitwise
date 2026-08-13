@@ -7,10 +7,12 @@
  *   orientation flag. Drawing that to a canvas naively gives a sideways image,
  *   and OCR on sideways text returns nothing at all.
  *
- *   Shrink it. A modern phone camera produces 4–12MB, well past Vercel's 4.5MB
- *   request cap. 1600px on the long edge is plenty — receipt text stays legible
- *   and the upload drops to a few hundred KB, which also makes it quick on a
- *   restaurant's patchy signal.
+ *   Shrink it. A 12-megapixel original takes far longer to recognise without
+ *   being any more legible. 2200px on the long edge keeps the small print of a
+ *   thermal receipt sharp while cutting the work substantially.
+ *
+ * The result is handed to Tesseract on the device and never uploaded, so this
+ * is about recognition speed and accuracy, not bandwidth.
  */
 
 /** Refuse obviously wrong files before doing any work on them. */
@@ -26,9 +28,9 @@ export class ImagePrepError extends Error {
 /**
  * @param {File|Blob} file
  * @param {{maxEdge?: number, quality?: number}} [options]
- * @returns {Promise<{imageBase64: string, mimeType: string, bytes: number}>}
+ * @returns {Promise<Blob>} upright, downscaled, ready for OCR
  */
-export async function prepareImage(file, { maxEdge = 1600, quality = 0.8 } = {}) {
+export async function prepareImage(file, { maxEdge = 2200, quality = 0.9 } = {}) {
   if (!file) throw new ImagePrepError('Pick a photo of the bill first.');
   if (!String(file.type || '').startsWith('image/')) {
     throw new ImagePrepError('That is not an image. Take a photo of the bill, or pick one.');
@@ -67,23 +69,5 @@ export async function prepareImage(file, { maxEdge = 1600, quality = 0.8 } = {})
     canvas.toBlob(resolve, 'image/jpeg', quality),
   );
   if (!blob) throw new ImagePrepError("Couldn't process that photo. Try another one.");
-
-  return {
-    imageBase64: await blobToBase64(blob),
-    mimeType: 'image/jpeg',
-    bytes: blob.size,
-  };
-}
-
-/** The bare base64, with the `data:` prefix stripped — the API wants only the payload. */
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new ImagePrepError("Couldn't read that photo."));
-    reader.onload = () => {
-      const result = String(reader.result);
-      resolve(result.slice(result.indexOf(',') + 1));
-    };
-    reader.readAsDataURL(blob);
-  });
+  return blob;
 }

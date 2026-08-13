@@ -80,15 +80,15 @@ export function DishSplit({
             <p className="text-xs font-semibold text-fg">
               Filled in from your photo
               <span className="ml-1.5 font-normal text-fg-subtle">
-                {scan.provider === 'tesseract'
-                  ? // Why the rougher reader was used. Temporary reasons are
-                    // worth saying, or a poor result looks like the only one
-                    // this app is capable of.
+                {scan.provider === 'gemini'
+                  ? 'read on your device, tidied up online'
+                  : // Why the rougher path was used. Temporary reasons are worth
+                    // saying, or a poor result looks like the only one this app
+                    // is capable of.
                     {
-                      upstream: 'the online reader was busy, so this was read on your device',
-                      quota: "today's free online scans are used up, so this was read on your device",
-                    }[scan.reason] ?? 'read on your device'
-                  : 'read online'}
+                      upstream: 'read on your device — the online tidy-up was busy',
+                      quota: "read on your device — today's free online tidy-ups are used up",
+                    }[scan.reason] ?? 'read on your device'}
               </span>
             </p>
             <button
