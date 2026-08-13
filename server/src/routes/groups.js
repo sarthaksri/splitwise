@@ -13,6 +13,8 @@ import { catchUpRecurring } from '../middleware/recurring.js';
 import { groupBalanceReport } from '../lib/ledger.js';
 import { netBalances } from '../lib/balances.js';
 import { loadScope } from '../lib/ledger.js';
+import { templateInvolves } from '../lib/recurring.js';
+import { formatMoney } from '../../../shared/money.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -272,23 +274,68 @@ router.post(
   }),
 );
 
+/**
+ * Remove someone from a group, or leave it yourself.
+ *
+ * Any member can do this — the same rule as editing an expense or a payment.
+ * There is no owner to appeal to in a flatshare, and a group where only one
+ * person can correct the roster is a group that goes stale.
+ *
+ * Removing somebody changes the roster and nothing else. Every expense and
+ * payment they were part of stays exactly as recorded, still showing their
+ * name, and every balance those produced is unchanged. That is only safe
+ * because of the three guards below: a non-zero balance, a standing bill still
+ * naming them, and — for a stand-in — history that would be orphaned if the
+ * record went away.
+ */
 router.delete(
   '/:id/members/:userId',
   requireGroupMember,
+  // Bring any bill that fell due today into the ledger first, or we might call
+  // someone settled a moment before their share of the rent lands.
+  catchUpRecurring,
   asyncHandler(async (req, res) => {
     const target = String(req.params.userId);
     if (!req.group.hasMember(target)) throw new ApiError(404, 'They are not in this group');
+
+    if (req.group.members.length === 1) {
+      throw new ApiError(400, 'A group needs at least one member');
+    }
+
+    const leaving = target === String(req.user._id);
+    const person = await User.findById(target).select('name isPlaceholder');
+    const them = leaving ? 'You' : (person?.name ?? 'They');
 
     // Removing someone mid-debt would silently destroy money, so block it —
     // the same thing Splitwise does.
     const { expenses, settlements } = await loadScope({ group: req.group._id });
     const balance = netBalances(expenses, settlements).get(target) ?? 0;
     if (balance !== 0) {
-      throw new ApiError(400, 'They still have an outstanding balance — settle up first');
+      const amount = formatMoney(Math.abs(balance), req.group.currency);
+      throw new ApiError(
+        400,
+        balance > 0
+          ? `${them} ${leaving ? 'are' : 'is'} still owed ${amount} — settle up first`
+          : `${them} still ${leaving ? 'owe' : 'owes'} ${amount} — settle up first`,
+      );
     }
 
-    if (req.group.members.length === 1) {
-      throw new ApiError(400, 'A group needs at least one member');
+    // A standing bill that still names them would generate their share again
+    // next cycle, rebuilding the balance we just checked was zero — for someone
+    // who can no longer see the group.
+    const templates = await RecurringExpense.find({
+      group: req.group._id,
+      active: true,
+      deletedAt: null,
+    });
+    const standing = templates.filter((t) => templateInvolves(t, target));
+    if (standing.length > 0) {
+      const names = standing.map((t) => `"${t.description}"`).join(', ');
+      throw new ApiError(
+        400,
+        `${names} would keep billing ${leaving ? 'you' : (person?.name ?? 'them')} every cycle` +
+          ' — pause or update it first',
+      );
     }
 
     req.group.members = req.group.members.filter(
@@ -296,14 +343,43 @@ router.delete(
     );
     await req.group.save();
 
-    // A stand-in exists only for this group, so removing them from it leaves an
-    // orphan record with no way to reach it. Clear it out.
-    await User.deleteOne({ _id: target, isPlaceholder: true, placeholderGroup: req.group._id });
+    // A stand-in exists only for this group, so once they're out of it their
+    // record is unreachable — unless something still points at it. Deleting one
+    // that appears in an old expense would turn a settled dinner into a row of
+    // "Unknown", which is exactly the history this endpoint promises to leave
+    // alone, so those are kept.
+    if (person?.isPlaceholder) {
+      const referenced = await placeholderIsReferenced(target);
+      if (!referenced) {
+        await User.deleteOne({ _id: target, isPlaceholder: true, placeholderGroup: req.group._id });
+      }
+    }
 
     await req.group.populate(MEMBER_POPULATE);
     res.json({ group: req.group });
   }),
 );
+
+/** Does anything still name this stand-in? Soft-deleted rows count: they can come back. */
+async function placeholderIsReferenced(userId) {
+  const counts = await Promise.all([
+    Expense.countDocuments({
+      $or: [
+        { 'paidBy.user': userId },
+        { 'shares.user': userId },
+        { 'items.sharedBy': userId },
+        { createdBy: userId },
+      ],
+    }),
+    Settlement.countDocuments({
+      $or: [{ from: userId }, { to: userId }, { createdBy: userId }],
+    }),
+    RecurringExpense.countDocuments({
+      $or: [{ 'paidBy.user': userId }, { 'items.sharedBy': userId }, { createdBy: userId }],
+    }),
+  ]);
+  return counts.some((n) => n > 0);
+}
 
 router.delete(
   '/:id',

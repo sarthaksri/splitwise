@@ -273,6 +273,246 @@ describe('groups', () => {
   });
 });
 
+describe('removing people from a group', () => {
+  async function trio() {
+    const aditi = await signUp('Aditi');
+    const rahul = await signUp('Rahul');
+    const sara = await signUp('Sara');
+    const { body } = await aditi.agent.post('/api/groups').send({
+      name: 'Flat 402',
+      memberIds: [rahul.user.id, sara.user.id],
+    });
+    return { aditi, rahul, sara, groupId: body.group._id };
+  }
+
+  /** A 900 dinner Aditi paid for, split three ways. */
+  const dinner = (ctx) =>
+    ctx.aditi.agent.post('/api/expenses').send({
+      group: ctx.groupId,
+      description: 'Dinner',
+      amountCents: 90000,
+      splitType: 'EQUAL',
+      participants: [ctx.aditi.user.id, ctx.rahul.user.id, ctx.sara.user.id],
+      paidBy: [{ userId: ctx.aditi.user.id, amountCents: 90000 }],
+    });
+
+  it('lets any member remove any other, not just whoever made the group', async () => {
+    const ctx = await trio();
+
+    // Sara did not create the group and is not an admin.
+    const res = await ctx.sara.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.group.members).toHaveLength(2);
+
+    expect((await ctx.rahul.agent.get(`/api/groups/${ctx.groupId}`)).status).toBe(403);
+  });
+
+  it('lets you leave a group yourself', async () => {
+    const ctx = await trio();
+    const res = await ctx.rahul.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`);
+    expect(res.status).toBe(200);
+    expect((await ctx.rahul.agent.get('/api/groups')).body.groups).toHaveLength(0);
+  });
+
+  it('leaves every recorded expense and payment exactly as it was', async () => {
+    const ctx = await trio();
+    await dinner(ctx);
+
+    // Square Rahul off so he is allowed to go.
+    await ctx.rahul.agent.post('/api/settlements').send({
+      group: ctx.groupId,
+      from: ctx.rahul.user.id,
+      to: ctx.aditi.user.id,
+      amountCents: 30000,
+    });
+
+    const before = await ctx.aditi.agent.get(`/api/expenses?group=${ctx.groupId}`);
+    const beforeBalances = await ctx.aditi.agent.get(`/api/groups/${ctx.groupId}/balances`);
+
+    const gone = await ctx.aditi.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`);
+    expect(gone.status).toBe(200);
+
+    const after = await ctx.aditi.agent.get(`/api/expenses?group=${ctx.groupId}`);
+    expect(after.body.expenses).toEqual(before.body.expenses);
+
+    // He is still named on the dinner, with his third of it.
+    const [expense] = after.body.expenses;
+    const his = expense.shares.find((s) => s.user._id === ctx.rahul.user.id);
+    expect(his.amountCents).toBe(30000);
+    expect(expense.shares.find((s) => s.user._id === ctx.rahul.user.id).user.name).toBe('Rahul');
+
+    // And his payment is still on the books.
+    const payments = await ctx.aditi.agent.get(`/api/settlements?group=${ctx.groupId}`);
+    expect(payments.body.settlements).toHaveLength(1);
+    expect(payments.body.settlements[0].from.name).toBe('Rahul');
+
+    // Balances are untouched: everyone still nets to what they did before.
+    const afterBalances = await ctx.aditi.agent.get(`/api/groups/${ctx.groupId}/balances`);
+    expect(afterBalances.body.net).toEqual(beforeBalances.body.net);
+  });
+
+  it('refuses while they still owe or are owed, and says which way', async () => {
+    const ctx = await trio();
+    await dinner(ctx);
+
+    const owes = await ctx.aditi.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`);
+    expect(owes.status).toBe(400);
+    expect(owes.body.error).toMatch(/Rahul still owes ₹300\.00/);
+
+    const owed = await ctx.rahul.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.aditi.user.id}`);
+    expect(owed.status).toBe(400);
+    expect(owed.body.error).toMatch(/Aditi is still owed ₹600\.00/);
+
+    // And phrased in the second person when you are the one leaving.
+    const me = await ctx.rahul.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`);
+    expect(me.status).toBe(400);
+    expect(me.body.error).toMatch(/You still owe/);
+  });
+
+  it('refuses while a standing bill would keep charging them', async () => {
+    const ctx = await trio();
+
+    const template = await ctx.aditi.agent.post('/api/recurring').send({
+      group: ctx.groupId,
+      description: 'Internet',
+      amountCents: 90000,
+      splitType: 'EQUAL',
+      participants: [ctx.aditi.user.id, ctx.rahul.user.id, ctx.sara.user.id],
+      paidBy: [{ userId: ctx.aditi.user.id, amountCents: 90000 }],
+      frequency: 'monthly',
+      // Starts well ahead, so nothing has fallen due and balances stay clean —
+      // this test is about the schedule, not about who owes what.
+      startDate: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString(),
+    });
+    expect(template.status).toBe(201);
+
+    const res = await ctx.aditi.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/"Internet" would keep billing Rahul/);
+
+    // Pausing it clears the way.
+    await ctx.aditi.agent
+      .patch(`/api/recurring/${template.body.recurring._id}`)
+      .send({ active: false });
+    expect(
+      (await ctx.aditi.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`)).status,
+    ).toBe(200);
+  });
+
+  it('keeps a stand-in on file when their expenses would be orphaned', async () => {
+    const aditi = await signUp('Aditi');
+    const { body } = await aditi.agent.post('/api/groups').send({ name: 'Flat' });
+    const groupId = body.group._id;
+    const { body: added } = await aditi.agent
+      .post(`/api/groups/${groupId}/placeholders`)
+      .send({ name: 'Priya' });
+    const priya = added.placeholder;
+
+    await aditi.agent.post('/api/expenses').send({
+      group: groupId,
+      description: 'Rent',
+      amountCents: 60000,
+      splitType: 'EQUAL',
+      participants: [aditi.user.id, priya.id],
+      paidBy: [
+        { userId: aditi.user.id, amountCents: 30000 },
+        { userId: priya.id, amountCents: 30000 },
+      ],
+    });
+
+    const res = await aditi.agent.delete(`/api/groups/${groupId}/members/${priya.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.group.members).toHaveLength(1);
+
+    // The user record survives, so the rent still reads "Priya" and not a blank.
+    const expenses = await aditi.agent.get(`/api/expenses?group=${groupId}`);
+    const share = expenses.body.expenses[0].shares.find((s) => s.user._id === priya.id);
+    expect(share.user.name).toBe('Priya');
+  });
+
+  it('cleans up a stand-in who was never used', async () => {
+    const aditi = await signUp('Aditi');
+    const { body } = await aditi.agent.post('/api/groups').send({ name: 'Flat' });
+    const groupId = body.group._id;
+    const { body: added } = await aditi.agent
+      .post(`/api/groups/${groupId}/placeholders`)
+      .send({ name: 'Priya' });
+
+    expect(
+      (await aditi.agent.delete(`/api/groups/${groupId}/members/${added.placeholder.id}`)).status,
+    ).toBe(200);
+
+    // Free to add them again under the same name.
+    expect(
+      (await aditi.agent.post(`/api/groups/${groupId}/placeholders`).send({ name: 'Priya' })).status,
+    ).toBe(201);
+  });
+
+  it('will not empty a group, or remove someone who was never in it', async () => {
+    const aditi = await signUp('Aditi');
+    const stranger = await signUp('Mallory');
+    const { body } = await aditi.agent.post('/api/groups').send({ name: 'Solo' });
+
+    const last = await aditi.agent.delete(`/api/groups/${body.group._id}/members/${aditi.user.id}`);
+    expect(last.status).toBe(400);
+    expect(last.body.error).toMatch(/at least one member/);
+
+    const nobody = await aditi.agent.delete(
+      `/api/groups/${body.group._id}/members/${stranger.user.id}`,
+    );
+    expect(nobody.status).toBe(404);
+  });
+
+  it('keeps outsiders from editing the roster', async () => {
+    const ctx = await trio();
+    const mallory = await signUp('Mallory');
+    expect(
+      (await mallory.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.sara.user.id}`)).status,
+    ).toBe(403);
+  });
+
+  it('still lets an old expense be corrected after someone leaves', async () => {
+    const ctx = await trio();
+    await dinner(ctx);
+    const { body: list } = await ctx.aditi.agent.get(`/api/expenses?group=${ctx.groupId}`);
+    const expenseId = list.expenses[0]._id;
+
+    await ctx.rahul.agent.post('/api/settlements').send({
+      group: ctx.groupId,
+      from: ctx.rahul.user.id,
+      to: ctx.aditi.user.id,
+      amountCents: 30000,
+    });
+    expect(
+      (await ctx.aditi.agent.delete(`/api/groups/${ctx.groupId}/members/${ctx.rahul.user.id}`)).status,
+    ).toBe(200);
+
+    // Fixing the description of a dinner Rahul was genuinely at must still work.
+    const fixed = await ctx.aditi.agent.patch(`/api/expenses/${expenseId}`).send({
+      group: ctx.groupId,
+      description: 'Dinner at Britannia',
+      amountCents: 90000,
+      splitType: 'EQUAL',
+      participants: [ctx.aditi.user.id, ctx.rahul.user.id, ctx.sara.user.id],
+      paidBy: [{ userId: ctx.aditi.user.id, amountCents: 90000 }],
+    });
+    expect(fixed.status).toBe(200);
+    expect(fixed.body.expense.description).toBe('Dinner at Britannia');
+
+    // But he cannot be put on anything new.
+    const fresh = await ctx.aditi.agent.post('/api/expenses').send({
+      group: ctx.groupId,
+      description: 'Cab',
+      amountCents: 60000,
+      splitType: 'EQUAL',
+      participants: [ctx.aditi.user.id, ctx.rahul.user.id],
+      paidBy: [{ userId: ctx.aditi.user.id, amountCents: 60000 }],
+    });
+    expect(fresh.status).toBe(400);
+    expect(fresh.body.error).toMatch(/must be a member of the group/);
+  });
+});
+
 describe('expenses and balances', () => {
   /** Three friends in one group — the fixture for the split tests. */
   async function trio() {

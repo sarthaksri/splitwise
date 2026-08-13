@@ -159,6 +159,18 @@ export function useAddMember(id) {
   });
 }
 
+/**
+ * Take someone off the roster. Their expenses and payments are untouched —
+ * this only stops them being picked for new ones.
+ */
+export function useRemoveMember(id) {
+  const invalidate = useInvalidateLedger();
+  return useMutation({
+    mutationFn: (userId) => api.delete(`/groups/${id}/members/${userId}`),
+    onSuccess: invalidate,
+  });
+}
+
 /** Add a stand-in for someone who hasn't signed up. */
 export function useAddPlaceholder(id) {
   const invalidate = useInvalidateLedger();

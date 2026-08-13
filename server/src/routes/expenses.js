@@ -55,8 +55,13 @@ const expenseSchema = z.object({
 /**
  * Everyone the expense touches must be a member of the group it's filed under
  * (or, for a non-group expense, must be someone the creator knows).
+ *
+ * `grandfathered` carries the people already on the expense being edited. Once
+ * somebody leaves the group they can't be added to anything new, but the
+ * dinners they were actually at must stay correctable — otherwise a departure
+ * silently freezes every expense they ever appeared in.
  */
-async function assertParticipantsAllowed(req, body, involved) {
+async function assertParticipantsAllowed(req, body, involved, grandfathered = new Set()) {
   if (body.group) {
     const group = await Group.findById(body.group);
     if (!group) throw new ApiError(404, 'Group not found');
@@ -64,7 +69,7 @@ async function assertParticipantsAllowed(req, body, involved) {
       throw new ApiError(403, 'You are not a member of this group');
     }
     const members = new Set(group.memberIds());
-    const stranger = [...involved].find((id) => !members.has(id));
+    const stranger = [...involved].find((id) => !members.has(id) && !grandfathered.has(id));
     if (stranger) throw new ApiError(400, 'Everyone involved must be a member of the group');
     return group;
   }
@@ -78,7 +83,7 @@ async function assertParticipantsAllowed(req, body, involved) {
 }
 
 /** Run the split engine over a request body and produce the persistable doc. */
-async function buildExpenseDoc(req, body) {
+async function buildExpenseDoc(req, body, grandfathered) {
   const { amountCents, shares, itemized } = computeShares({
     splitType: body.splitType,
     amountCents: body.amountCents ?? undefined,
@@ -101,7 +106,7 @@ async function buildExpenseDoc(req, body) {
     ...payers.map((p) => p.userId),
     ...shares.map((s) => s.userId),
   ]);
-  await assertParticipantsAllowed(req, body, involved);
+  await assertParticipantsAllowed(req, body, involved, grandfathered);
 
   return {
     doc: {
@@ -226,7 +231,12 @@ router.patch(
   validate(expenseSchema),
   asyncHandler(async (req, res) => {
     const existing = await loadVisibleExpense(req);
-    const { doc } = await buildExpenseDoc(req, req.body);
+    // Anyone already on this expense stays allowed on it, member or not.
+    const already = new Set([
+      ...existing.paidBy.map((p) => String(p.user)),
+      ...existing.shares.map((s) => String(s.user)),
+    ]);
+    const { doc } = await buildExpenseDoc(req, req.body, already);
 
     // Moving an expense between groups would silently rewrite two ledgers.
     if (String(doc.group ?? '') !== String(existing.group ?? '')) {

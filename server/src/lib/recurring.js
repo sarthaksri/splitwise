@@ -35,6 +35,25 @@ function sharesFor(template) {
 }
 
 /**
+ * Would this template still bill the given person on its next cycle?
+ *
+ * Asked before letting someone leave a group: a standing bill that keeps
+ * naming them would quietly rebuild the balance we just checked was zero, and
+ * they'd have no way to see it.
+ */
+export function templateInvolves(template, userId) {
+  const target = String(userId);
+  if ((template.paidBy ?? []).some((p) => id(p.user) === target)) return true;
+  try {
+    return sharesFor(template).some((s) => id(s.user) === target);
+  } catch {
+    // A template that no longer computes can't be reasoned about. Say yes, so
+    // the caller errs towards keeping the member rather than losing money.
+    return true;
+  }
+}
+
+/**
  * Create any expenses that have fallen due for one template.
  *
  * Missed cycles are backfilled — three months away means three rents, not one,

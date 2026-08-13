@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { formatMoney } from '@shared/money.js';
 import {
   useAddMember,
@@ -9,6 +9,7 @@ import {
   useExpenses,
   useGroup,
   useLinkPlaceholder,
+  useRemoveMember,
   useSettlements,
   useUpdateGroup,
 } from '../hooks/queries.js';
@@ -40,6 +41,7 @@ export function GroupPage() {
   const [adding, setAdding] = useState(false);
   const [settle, setSettle] = useState(null);
   const [editingPayment, setEditingPayment] = useState(null);
+  const [managing, setManaging] = useState(null);
   const [linking, setLinking] = useState(null);
   const [inviting, setInviting] = useState(false);
 
@@ -86,33 +88,33 @@ export function GroupPage() {
           </div>
         </div>
 
+        {/* Every chip is a button: tapping one opens what you can do with that
+            person — see their balance, remove them, or hand a stand-in over to
+            a real account. */}
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          {people.map((p) =>
-            // A stand-in is a button: tapping it offers to link a real account.
-            p.isPlaceholder ? (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => setLinking(p)}
-                title={`${p.name} has no account — tap to link one`}
-                className="chip-tap flex items-center gap-1.5 rounded-full border border-dashed border-line py-0.5 pl-0.5 pr-2.5 text-xs font-medium text-fg-muted transition hover:bg-hover"
-              >
-                <Avatar user={p} size={20} />
-                {p.name}
+          {people.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setManaging(p)}
+              title={
+                p.isPlaceholder ? `${p.name} has no account — tap to manage` : `Manage ${p.name}`
+              }
+              className={`chip-tap flex items-center gap-1.5 rounded-full py-0.5 pl-0.5 pr-2.5 text-xs font-medium text-fg-muted transition hover:bg-hover ${
+                p.isPlaceholder
+                  ? 'border border-dashed border-line'
+                  : 'bg-surface ring-1 ring-line'
+              }`}
+            >
+              <Avatar user={p} size={20} />
+              {p.id === user?.id ? 'You' : p.name}
+              {p.isPlaceholder && (
                 <span className="text-[10px] uppercase tracking-wide text-fg-subtle">
                   no account
                 </span>
-              </button>
-            ) : (
-              <span
-                key={p.id}
-                className="flex items-center gap-1.5 rounded-full bg-surface py-0.5 pl-0.5 pr-2.5 text-xs font-medium text-fg-muted ring-1 ring-line"
-              >
-                <Avatar user={p} size={20} />
-                {p.id === user?.id ? 'You' : p.name}
-              </span>
-            ),
-          )}
+              )}
+            </button>
+          ))}
         </div>
       </header>
 
@@ -210,6 +212,23 @@ export function GroupPage() {
         people={people}
       />
       <InviteModal open={inviting} onClose={() => setInviting(false)} groupId={groupId} />
+      <MemberModal
+        open={Boolean(managing)}
+        onClose={() => setManaging(null)}
+        groupId={groupId}
+        group={g}
+        member={managing}
+        isMe={managing?.id === user?.id}
+        memberCount={people.length}
+        balanceCents={
+          balances.data?.net.find((n) => n.userId === managing?.id)?.amountCents ?? 0
+        }
+        onLink={() => {
+          const target = managing;
+          setManaging(null);
+          setLinking(target);
+        }}
+      />
       <LinkPlaceholderModal
         open={Boolean(linking)}
         onClose={() => setLinking(null)}
@@ -525,6 +544,140 @@ function PaymentDetail({ payment, currency, currentUserId, onClose, onEdit }) {
             </>
           )}
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * What you can do with one member: see where they stand, hand a stand-in over
+ * to a real account, or take them off the roster.
+ *
+ * Any member can remove any other, including themselves — a flatshare has no
+ * owner to appeal to. The server refuses while they still owe or are owed, or
+ * while a recurring bill would keep charging them, and says which.
+ */
+function MemberModal({
+  open,
+  onClose,
+  groupId,
+  group,
+  member,
+  isMe,
+  memberCount,
+  balanceCents,
+  onLink,
+}) {
+  const navigate = useNavigate();
+  const remove = useRemoveMember(groupId);
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setConfirming(false);
+      remove.reset();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, member]);
+
+  if (!member) return null;
+
+  const name = isMe ? 'You' : member.name;
+  const lastOne = memberCount <= 1;
+
+  return (
+    <Modal open={open} onClose={onClose} title={isMe ? 'You' : member.name}>
+      <div className="space-y-4 p-5">
+        <div className="flex items-center gap-3">
+          <Avatar user={member} size={44} />
+          <div className="min-w-0">
+            <p className="truncate text-base font-semibold text-fg">{member.name}</p>
+            <p className="truncate text-xs text-fg-subtle">
+              {member.isPlaceholder
+                ? 'Stand-in — no account yet'
+                : member.username
+                  ? `@${member.username}`
+                  : 'Member'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between rounded-xl border border-line px-3.5 py-2.5">
+          <span className="text-sm text-fg-muted">
+            {balanceCents === 0
+              ? 'Settled up in this group'
+              : balanceCents > 0
+                ? `${name} ${isMe ? 'are' : 'is'} owed`
+                : `${name} ${isMe ? 'owe' : 'owes'}`}
+          </span>
+          {balanceCents !== 0 && <Money cents={balanceCents} currency={group.currency} />}
+        </div>
+
+        {member.isPlaceholder && (
+          <button type="button" className="btn-secondary w-full" onClick={onLink}>
+            Link to a real account
+          </button>
+        )}
+
+        <ErrorNote error={remove.error} />
+
+        {confirming ? (
+          <div className="space-y-3 rounded-xl border border-line bg-sunken p-3.5">
+            <p className="text-sm text-fg">
+              {isMe ? 'Leave' : `Remove ${member.name} from`} <b>{group.name}</b>?
+            </p>
+            <p className="text-xs text-fg-muted">
+              Every expense and payment {isMe ? 'you' : 'they'} appear in stays exactly as
+              recorded, {isMe ? 'your' : 'their'} name and all. {isMe ? 'You' : 'They'} just
+              can&apos;t be picked for new ones.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button type="button" className="btn-secondary" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                disabled={remove.isPending}
+                onClick={async () => {
+                  try {
+                    await remove.mutateAsync(member.id);
+                    onClose();
+                    // You can't stay on the page for a group you just left.
+                    if (isMe) navigate('/');
+                  } catch {
+                    // The reason is in the ErrorNote — keep the sheet open so
+                    // it's readable, and drop back out of the confirm step.
+                    setConfirming(false);
+                  }
+                }}
+              >
+                {remove.isPending ? (
+                  <Spinner className="border-white/40 border-t-white" />
+                ) : isMe ? (
+                  'Leave group'
+                ) : (
+                  'Remove'
+                )}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex justify-between gap-2 border-t border-line pt-3">
+            <button
+              type="button"
+              className="btn-danger"
+              disabled={lastOne}
+              title={lastOne ? 'A group needs at least one member' : undefined}
+              onClick={() => setConfirming(true)}
+            >
+              {isMe ? 'Leave group' : 'Remove from group'}
+            </button>
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Done
+            </button>
+          </div>
+        )}
       </div>
     </Modal>
   );
