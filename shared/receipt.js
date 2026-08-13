@@ -182,20 +182,32 @@ export function reconcileScan(scan) {
  * number.
  */
 const SUMMARY_PATTERNS = [
+  // Ahead of `discount`, because "Round Off" contains a standalone "off" and
+  // would otherwise be booked as one.
+  { field: 'other', re: /\b(delivery|packing|packaging|container|convenience|round[\s-]*off)\b/i, sum: true },
   { field: 'discount', re: /\b(discount|less|off|promo|coupon)\b/i },
   { field: 'tip', re: /\b(tip|gratuity|service\s*charge|svc\s*chg)\b/i },
   // Indian bills split the tax across CGST and SGST lines (and sometimes a
   // cess), so these have to be added up. Keeping only the last one silently
   // halves the tax — the kind of error that looks entirely plausible on screen.
   { field: 'tax', re: /\b(cgst|sgst|igst|gst|vat|service\s*tax|cess|tax)\b/i, sum: true },
-  { field: 'other', re: /\b(delivery|packing|packaging|container|convenience|round[\s-]*off)\b/i, sum: true },
   { field: 'subtotal', re: /\b(sub\s*total|sub-total)\b/i },
   { field: 'total', re: /\b(grand\s*total|net\s*(payable|amount)|total\s*(due|payable|amount)?|amount\s*payable|bill\s*amount)\b/i },
 ];
 
 /** Noise a receipt is full of that must never become a dish. */
 const IGNORE_LINE =
-  /\b(invoice|bill\s*no|table|covers?|gstin|fssai|phone|tel\b|date|time|cashier|steward|server|thank|visit\s*again|www\.|@|receipt|order\s*no|token|counter|qty\b\s*$|paid|change|cash|card|upi|balance)\b/i;
+  /\b(invoice|bill\s*no|table|covers?|gstin|fssai|hsn|sac|kot|user\s*id|stw|phone|tel\b|date|time|cashier|steward|server|thank|visit\s*again|www\.|@|receipt|order\s*no|token|counter|paid|change|cash|card|upi|balance|total\s*items)\b/i;
+
+/**
+ * The column header on an itemised bill — "SNo Description Qty Rate Amount".
+ * It carries no trailing number, so without this it would be mistaken for a
+ * dish name waiting for its price on the next line.
+ */
+const HEADER_LINE = /\b(s\.?\s*no|description|particulars|item)\b|\bqty\b|\brate\b|\bamount\b/i;
+
+/** A line that is nothing but numbers: the "1 425.00 425.00" under a dish name. */
+const NUMBERS_ONLY = /^[\d\s.,]+$/;
 
 /**
  * Pull the trailing price off a line.
@@ -211,6 +223,16 @@ const IGNORE_LINE =
 function trailingAmount(line) {
   const m = line.match(/(-?\d[\d,]*(?:[.,]\d{1,2})?)\s*(?:\/-|₹|rs\.?)?\s*$/i);
   if (!m) return null;
+
+  /*
+   * A price lives in its own right-hand column, so something separates it from
+   * the label. A number jammed straight onto the text is an identifier, not an
+   * amount — "Food:996331" is an HSN tax code, and read as a price it becomes a
+   * ₹9,963.31 dish called "Food". Same for "Bill No:43088".
+   */
+  const before = m.index === 0 ? ' ' : line[m.index - 1];
+  if (!/[\s₹$€£+(]/.test(before)) return null;
+
   let text = m[1];
 
   const negative = text.startsWith('-');
@@ -222,6 +244,45 @@ function trailingAmount(line) {
 
   const cents = amountCents(text);
   return cents == null ? null : { cents, negative, at: m.index };
+}
+
+/**
+ * Drop the serial number an itemised bill prints beside each dish
+ * ("1  Lotus Wafers"). Only when a real name follows, so "7Up" survives.
+ */
+function stripSerial(line) {
+  const m = line.match(/^\s*\d{1,3}\s+([a-z].*)$/i);
+  return m && m[1].trim().length >= 3 ? m[1] : line;
+}
+
+/** Every number on a line, in order, as a float. */
+function numbersIn(line) {
+  return (line.match(/\d[\d,]*(?:\.\d{1,2})?/g) ?? []).map((n) => Number(n.replace(/,/g, '')));
+}
+
+/**
+ * Turn a bill's "Qty Rate Amount" row into an item.
+ *
+ * The trap is that Amount is already Qty × Rate. Taking qty=2 and price=550
+ * from "2  275.00  550.00" would bill ₹1,100 for a ₹550 line — double, and
+ * entirely plausible-looking. So when the three columns multiply out, the rate
+ * is used as the price; otherwise quantity is dropped to 1 and the last number
+ * taken as the line total, which is right either way.
+ */
+function columnsToItem(line) {
+  const nums = numbersIn(line);
+  const last = nums.at(-1) ?? 0;
+
+  if (nums.length >= 3) {
+    const [qty, rate] = nums;
+    if (
+      Number.isInteger(qty) && qty >= 1 && qty < 100 &&
+      Math.abs(qty * rate - last) < 0.01
+    ) {
+      return { qty, price: rate };
+    }
+  }
+  return { qty: 1, price: last };
 }
 
 /**
@@ -256,30 +317,89 @@ export function parseReceiptText(text) {
 
   const raw = { items: [], currency: 'INR' };
   const summary = {};
+  /*
+   * Many Indian POS bills print the dish on one line and its figures on the
+   * next:
+   *
+   *   1  Lotus Wafers
+   *          1     425.00     425.00
+   *   2  French Fries Spice Dusted
+   *          2     275.00     550.00
+   *
+   * so a name is held here until the numbers underneath it arrive. Without
+   * this the name lines have no price and the number lines have no name, and
+   * the whole bill reads as empty.
+   */
+  let pendingName = null;
 
   for (const line of lines) {
     const amount = trailingAmount(line);
-    if (!amount) continue;
+
+    if (!amount) {
+      // Text with no figures: either a dish awaiting its numbers, or noise.
+      const candidate = cleanName(stripSerial(line));
+      pendingName =
+        candidate.length >= 2 &&
+        /[a-z]{2}/i.test(candidate) &&
+        !HEADER_LINE.test(line) &&
+        !IGNORE_LINE.test(line)
+          ? candidate
+          : null;
+      continue;
+    }
+
+    // The figures belonging to the dish named on the line above.
+    if (pendingName && NUMBERS_ONLY.test(line)) {
+      raw.items.push({ name: pendingName, ...columnsToItem(line) });
+      pendingName = null;
+      continue;
+    }
 
     const label = line.slice(0, amount.at).trim();
 
-    // A summary row: record it and move on. Checked before the ignore list so
-    // a "Total" line still counts even though it also matches nothing else.
+    // Noise first. "Total Items : 26" would otherwise be read as a ₹0.26 grand
+    // total — and because bills print it *after* the real one, last-wins meant
+    // it replaced a correct figure with a nonsense one.
+    if (IGNORE_LINE.test(label)) {
+      pendingName = null;
+      continue;
+    }
+
+    // A summary row: record it and move on.
     const matched = SUMMARY_PATTERNS.find((p) => p.re.test(label));
     if (matched) {
-      if (matched.sum) {
+      pendingName = null;
+      let { field } = matched;
+      // A negative round-off is money off the bill, which this app already
+      // models as a discount. `other` cannot be negative anywhere downstream.
+      if (field === 'other' && amount.negative) field = 'discount';
+      if (matched.sum || field === 'discount') {
         // Components of one figure — CGST + SGST, delivery + packing.
-        summary[matched.field] = (summary[matched.field] ?? 0) + amount.cents;
+        summary[field] = (summary[field] ?? 0) + amount.cents;
+      } else if (field === 'total') {
+        /*
+         * Largest wins, because the grand total is structurally the biggest
+         * figure on a bill — bigger than the subtotal it contains, and bigger
+         * than any count printed alongside it.
+         *
+         * Keeping the last one instead looked fine until OCR read "Total Items
+         * : 17" as "Total Ttems : 17". The keyword guard missed the typo, the
+         * line was taken as a ₹17 grand total, and it replaced a correct
+         * ₹8,987.70. A rule about magnitude cannot be defeated by a misread
+         * letter, which a rule about words can.
+         */
+        summary.total = Math.max(summary.total ?? 0, amount.cents);
       } else {
-        // Keep the *last* occurrence: bills often print a running total and
+        // Keep the *last* occurrence: bills often print a running figure and
         // then the real one at the foot.
-        summary[matched.field] = amount.cents;
+        summary[field] = amount.cents;
       }
       continue;
     }
 
+    pendingName = null;
     // A dish with a negative price is a misread, not a refund line.
-    if (!label || amount.negative || IGNORE_LINE.test(label)) continue;
+    if (!label || amount.negative || IGNORE_LINE.test(label) || HEADER_LINE.test(label)) continue;
     // A line that is only punctuation or a lone letter after cleaning is noise.
     const [qty, rest] = leadingQty(label);
     const name = cleanName(rest);

@@ -64,5 +64,14 @@ export async function scanReceipt(file, { onProgress, onEngine } = {}) {
   const text = await withTesseract(file, onProgress);
   const scan = normalizeScan(parseReceiptText(text));
   onProgress?.(1);
-  return { scan, reconcile: reconcileScan(scan), provider: 'tesseract' };
+  return {
+    scan,
+    reconcile: reconcileScan(scan),
+    provider: 'tesseract',
+    // 'no-key' means this is simply how the app is set up here; 'upstream'
+    // means the good reader was busy. Worth telling apart — the second is
+    // temporary, and a rough result deserves that explanation rather than
+    // leaving the app looking bad at its job.
+    reason: result?.reason ?? 'upstream',
+  };
 }

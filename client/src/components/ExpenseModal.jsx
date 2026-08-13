@@ -182,7 +182,7 @@ export function ExpenseModal({ open, onClose, group, people: peopleProp, expense
    * the date and who paid stay yours, and a misread date filing an expense in
    * the wrong month is a class of error worth not inviting.
    */
-  function applyScan({ scan: result, reconcile, provider }) {
+  function applyScan({ scan: result, reconcile, provider, reason }) {
     const everyone = people.map((p) => p.id);
     setSplitType(SPLIT_TYPES.ITEMIZED);
     setItems(
@@ -201,7 +201,7 @@ export function ExpenseModal({ open, onClose, group, people: peopleProp, expense
       otherCents: result.otherCents ?? 0,
       discountCents: result.discountCents ?? 0,
     });
-    setScan({ provider, printedCents: reconcile?.printedCents ?? null });
+    setScan({ provider, reason, printedCents: reconcile?.printedCents ?? null });
   }
 
   // For dish-wise the dishes define the total, so the amount field mirrors them.

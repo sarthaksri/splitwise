@@ -229,6 +229,119 @@ describe('parseReceiptText', () => {
     expect(reconcileScan(scan).diffCents).not.toBe(0);
   });
 
+  /**
+   * A real bill, transcribed from a photo of one: the dish name sits on its own
+   * line and the Qty/Rate/Amount columns land underneath it. This layout is
+   * everywhere on Indian POS printers, and it read as a completely empty bill
+   * until the parser learned to pair the two lines.
+   */
+  const TWO_LINE_BILL = `
+    Red Rhino
+    Dine In
+    GSTIN 36AAIFV7298E1ZD
+    FSSAI NO 13622013000544
+    Bill No: 43088    Date: 08-08-26  Time: 00.36
+    Stw: SUJOY   Table No: P38   Covers: 1
+    SNo Description
+             Qty    Rate    Amount
+    1  Lotus Wafers
+             1     425.00    425.00
+    2  French Fries Spice Dusted
+             2     275.00    550.00
+    3  Add on Chicken
+             1      95.00     95.00
+    4  COKE CAN
+             1     140.00    140.00
+    5  Nachos Ala Rhino
+             3     545.00   1635.00
+    6  Creamy Penne Rosso
+             1     500.00    500.00
+    7  Long Island Iced Tea
+             1     725.00    725.00
+    8  Long Beach Ice tea
+             2     725.00   1450.00
+    9  MANGO CIDER 500ML
+             8     575.00   4600.00
+    10  BULLFROG
+             2     725.00   1450.00
+    11  Soul Serfer 500 ml
+             1     425.00    425.00
+    12  Bangalore Daze 500 ml
+             3     450.00   1350.00
+    Total Amount            13345.00
+    Service Charge @ 10%        0.00
+    State Gst @ 2.5%           83.65
+    Central Gst @ 2.5%         83.65
+    Round Off                  -0.30
+    Net Amount              13512.00
+    Total Items : 26
+    HSN / SAC :
+      Food:996331
+    User ID: JITENDRA
+  `;
+
+  it('pairs a dish name with the figures printed on the line below it', () => {
+    const raw = parseReceiptText(TWO_LINE_BILL);
+    expect(raw.items).toHaveLength(12);
+    expect(raw.items[0]).toEqual({ name: 'Lotus Wafers', qty: 1, price: 425 });
+    expect(raw.items[1]).toEqual({ name: 'French Fries Spice Dusted', qty: 2, price: 275 });
+    expect(raw.items[8]).toEqual({ name: 'MANGO CIDER 500ML', qty: 8, price: 575 });
+  });
+
+  it('uses the rate, not the line total, when quantity is more than one', () => {
+    const raw = parseReceiptText(TWO_LINE_BILL);
+    // "2  275.00  550.00" must not become 2 × ₹550. The dishes have to add up
+    // to the ₹13,345 the bill itself prints.
+    const dishes = raw.items.reduce((sum, i) => sum + i.price * i.qty, 0);
+    expect(dishes).toBeCloseTo(13345, 2);
+  });
+
+  it('keeps the header, the serial numbers and the footer out of the dishes', () => {
+    const names = parseReceiptText(TWO_LINE_BILL).items.map((i) => i.name);
+    expect(names).not.toContain('Description');
+    expect(names.some((n) => /qty|rate|amount|hsn|user id|covers|stw/i.test(n))).toBe(false);
+    // The serial number is stripped, but a name that starts with a digit is not.
+    expect(names[0]).toBe('Lotus Wafers');
+  });
+
+  it('reads that bill\'s summary block exactly', () => {
+    const raw = parseReceiptText(TWO_LINE_BILL);
+    expect(raw.tax).toBeCloseTo(167.3, 2); // 83.65 State + 83.65 Central
+    expect(raw.tip).toBe(0); // service charge at 10% came to nothing
+    expect(raw.discount).toBeCloseTo(0.3, 2); // a negative round-off is money off
+    // "Total Items : 26" must not clobber this, and it is printed afterwards.
+    expect(raw.total).toBe(13512);
+  });
+
+  it('reconciles that bill to the paise', () => {
+    const scan = normalizeScan(parseReceiptText(TWO_LINE_BILL));
+    // 13345 dishes + 167.30 tax − 0.30 round-off = 13512.00 exactly.
+    expect(reconcileScan(scan).diffCents).toBe(0);
+  });
+
+  it('is not fooled by an item count OCR has mangled into a total', () => {
+    // Tesseract really does read "Total Items" as "Total Ttems", which slips
+    // past a keyword guard. Taking the largest candidate does not care.
+    const raw = parseReceiptText(`
+      Biryani                240.00
+      Total Amount           240.00
+      Gst                     12.00
+      Net Amount             252.00
+      Total Ttems : 17
+    `);
+    expect(raw.total).toBe(252);
+  });
+
+  it('prefers the grand total over the subtotal printed above it', () => {
+    const raw = parseReceiptText(`
+      Pasta                  500.00
+      Total Amount           500.00
+      Service Charge          50.00
+      Net Amount             550.00
+    `);
+    expect(raw.total).toBe(550);
+  });
+
   it('survives complete gibberish without throwing', () => {
     expect(() => parseReceiptText('~~~ ### ...')).not.toThrow();
     expect(parseReceiptText('~~~ ### ...').items).toEqual([]);

@@ -279,6 +279,14 @@ The choice is automatic — the server answers `fallback: "tesseract"` when it h
 the call fails, and the browser takes over. Deliberately a `200`, not an error: falling back
 is a normal outcome, and a working fallback shouldn't look like a broken app.
 
+Gemini is tried as a chain — `gemini-3.7-flash`, then `gemini-flash-latest`, then
+`gemini-3.1-flash-lite` — with 8 seconds per model and 18 for the lot. Both limits are there
+for reasons that have already bitten: a pinned model **gets retired** (`gemini-2.5-flash`
+now answers 404 for new keys, which silently demoted every scan), and the free tier is
+**often saturated for image requests** — one measured 503 took 98 seconds to come back.
+Waiting that out is worse than not trying, so the app gives up quickly and reads it locally,
+and says which reader it used.
+
 **The photo is never stored.** It's read and dropped — not written to the database, to disk
 or to a log. With Tesseract it never leaves the device at all.
 

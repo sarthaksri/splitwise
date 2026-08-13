@@ -80,7 +80,13 @@ export function DishSplit({
             <p className="text-xs font-semibold text-fg">
               Filled in from your photo
               <span className="ml-1.5 font-normal text-fg-subtle">
-                {scan.provider === 'tesseract' ? 'read on your device' : 'read online'}
+                {scan.provider === 'tesseract'
+                  ? scan.reason === 'upstream'
+                    ? // Temporary, and not the app being bad at its job — say so,
+                      // or a rough result looks like the only result available.
+                      'the online reader was busy, so this was read on your device'
+                    : 'read on your device'
+                  : 'read online'}
               </span>
             </p>
             <button
