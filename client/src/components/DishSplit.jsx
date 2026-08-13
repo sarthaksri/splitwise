@@ -81,11 +81,13 @@ export function DishSplit({
               Filled in from your photo
               <span className="ml-1.5 font-normal text-fg-subtle">
                 {scan.provider === 'tesseract'
-                  ? scan.reason === 'upstream'
-                    ? // Temporary, and not the app being bad at its job — say so,
-                      // or a rough result looks like the only result available.
-                      'the online reader was busy, so this was read on your device'
-                    : 'read on your device'
+                  ? // Why the rougher reader was used. Temporary reasons are
+                    // worth saying, or a poor result looks like the only one
+                    // this app is capable of.
+                    {
+                      upstream: 'the online reader was busy, so this was read on your device',
+                      quota: "today's free online scans are used up, so this was read on your device",
+                    }[scan.reason] ?? 'read on your device'
                   : 'read online'}
               </span>
             </p>

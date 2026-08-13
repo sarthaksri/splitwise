@@ -17,18 +17,26 @@ import { SCAN_SCHEMA } from '../../../shared/receipt.js';
 /**
  * Models to try, in order.
  *
- * Pinning a single model is what broke this once already: `gemini-2.5-flash`
- * was retired for new keys and started answering 404, which silently demoted
- * every scan to the on-device engine. So there's a chain — a current model
- * first, then the floating `-latest` alias, then a lighter one. A retirement or
- * a capacity spike costs a few hundred milliseconds instead of the feature.
+ * Flash Lite leads on quota, not on quality. The free tier allows it **500
+ * requests a day at 15/minute**, against **20 a day at 5/minute** for the full
+ * Flash models — and this is one project key shared by everybody using the
+ * deployment, not a per-user allowance. Twenty scans a day is roughly seven
+ * dinners for the entire app, and every attempt in a chain spends one, so
+ * leading with Flash would exhaust the day's budget by the evening.
  *
- * GEMINI_MODEL overrides the first entry without removing the safety net.
+ * One fallback, not three, for the same reason: each extra attempt costs
+ * another request from a small pot.
+ *
+ * Pinning a single model is separately what broke this once already —
+ * `gemini-2.5-flash` was retired for new keys, started answering 404, and every
+ * scan silently demoted to the on-device engine.
+ *
+ * GEMINI_MODEL overrides the first entry: set it to `gemini-3.6-flash` for the
+ * better reader, and accept 20 scans a day.
  */
 const MODELS = [
-  process.env.GEMINI_MODEL || 'gemini-3.7-flash',
+  process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
   'gemini-flash-latest',
-  'gemini-3.1-flash-lite',
 ].filter((m, i, all) => all.indexOf(m) === i);
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -41,9 +49,16 @@ const TRY_NEXT = new Set([404, 429, 500, 502, 503, 504]);
  * the on-device engine is the right move rather than showing an error.
  */
 export class GeminiUnavailable extends Error {
-  constructor(reason) {
+  /**
+   * @param {string} reason for the log
+   * @param {'quota'|'upstream'} kind what to tell the user. The free daily
+   *   allowance running out is worth distinguishing from a capacity blip:
+   *   one comes back tomorrow, the other in a few minutes.
+   */
+  constructor(reason, kind = 'upstream') {
     super(reason);
     this.name = 'GeminiUnavailable';
+    this.kind = kind;
   }
 }
 
@@ -101,6 +116,7 @@ export async function extractReceipt({ imageBase64, mimeType }) {
    */
   const deadline = Date.now() + 18_000;
   const failures = [];
+  let outOfQuota = false;
 
   for (const model of MODELS) {
     const remaining = deadline - Date.now();
@@ -134,6 +150,8 @@ export async function extractReceipt({ imageBase64, mimeType }) {
       // never carries the image back, so it is safe to read.
       const detail = await res.text().catch(() => '');
       failures.push(`${model}: HTTP ${res.status} ${detail.slice(0, 120)}`);
+      // 429 on the free tier is the daily or per-minute allowance, not a fault.
+      if (res.status === 429) outOfQuota = true;
       if (TRY_NEXT.has(res.status)) continue;
       // A 400 or 403 is our fault or the key's — the next model would fail the
       // same way, so stop rather than hammering three of them.
@@ -154,5 +172,8 @@ export async function extractReceipt({ imageBase64, mimeType }) {
     }
   }
 
-  throw new GeminiUnavailable(failures.join(' | ') || 'no model responded');
+  throw new GeminiUnavailable(
+    failures.join(' | ') || 'no model responded',
+    outOfQuota ? 'quota' : 'upstream',
+  );
 }

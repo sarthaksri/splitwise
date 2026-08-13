@@ -840,13 +840,24 @@ describe('scanning a bill', () => {
     expect(res.body.reconcile.diffCents).toBe(25000);
   });
 
-  it('falls back rather than erroring when the quota is spent', async () => {
+  it('falls back rather than erroring when the free allowance is spent', async () => {
     const { agent } = await signUp('Aditi');
     stubGemini({ ok: false, status: 429, text: async () => 'rate limited' });
 
     const res = await agent.post('/api/expenses/scan').send(body);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ provider: null, fallback: 'tesseract', reason: 'upstream' });
+    // 'quota', not the generic 'upstream': the free tier resetting tomorrow is
+    // a different thing to tell someone than a capacity blip clearing in
+    // minutes, and the panel says which.
+    expect(res.body).toMatchObject({ provider: null, fallback: 'tesseract', reason: 'quota' });
+  });
+
+  it('reports a busy upstream as temporary, not as spent quota', async () => {
+    const { agent } = await signUp('Aditi');
+    stubGemini({ ok: false, status: 503, text: async () => 'high demand' });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.body).toMatchObject({ fallback: 'tesseract', reason: 'upstream' });
   });
 
   it('falls back when the model returns something that is not JSON', async () => {

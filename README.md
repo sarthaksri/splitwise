@@ -279,13 +279,22 @@ The choice is automatic — the server answers `fallback: "tesseract"` when it h
 the call fails, and the browser takes over. Deliberately a `200`, not an error: falling back
 is a normal outcome, and a working fallback shouldn't look like a broken app.
 
-Gemini is tried as a chain — `gemini-3.7-flash`, then `gemini-flash-latest`, then
-`gemini-3.1-flash-lite` — with 8 seconds per model and 18 for the lot. Both limits are there
-for reasons that have already bitten: a pinned model **gets retired** (`gemini-2.5-flash`
-now answers 404 for new keys, which silently demoted every scan), and the free tier is
-**often saturated for image requests** — one measured 503 took 98 seconds to come back.
-Waiting that out is worse than not trying, so the app gives up quickly and reads it locally,
-and says which reader it used.
+Gemini is tried as a short chain — `gemini-3.1-flash-lite`, then `gemini-flash-latest` —
+with 8 seconds per model and 18 for the lot. Every part of that is a scar:
+
+- **Lite leads on quota, not quality.** The free tier gives it 500 requests/day at 15/min,
+  against 20/day at 5/min for the full Flash models — and that is *one project key shared by
+  every user of the deployment*. Twenty scans a day is about seven dinners for the whole app.
+  Set `GEMINI_MODEL=gemini-3.6-flash` to trade volume for accuracy.
+- **Two models, not five.** Each attempt spends a request from a small pot.
+- **A pinned model gets retired.** `gemini-2.5-flash` now answers 404 for new keys, which
+  silently demoted every scan to the on-device reader.
+- **The free tier is often saturated for image requests**, and a saturated endpoint does not
+  refuse quickly — measured 503s took between 18 and 306 seconds. Waiting that out is worse
+  than not trying, so it bails and reads locally.
+
+The panel says which reader ran and why: *"the online reader was busy"* or *"today's free
+online scans are used up"*, so a rough result is never mistaken for the best the app can do.
 
 **The photo is never stored.** It's read and dropped — not written to the database, to disk
 or to a log. With Tesseract it never leaves the device at all.

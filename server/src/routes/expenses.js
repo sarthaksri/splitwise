@@ -195,7 +195,7 @@ router.post(
       if (err instanceof GeminiUnavailable) {
         // Log the reason, never the image.
         console.warn('[scan] gemini unavailable:', err.message);
-        return res.json({ provider: null, fallback: 'tesseract', reason: 'upstream' });
+        return res.json({ provider: null, fallback: 'tesseract', reason: err.kind ?? 'upstream' });
       }
       if (err instanceof ScanError) throw new ApiError(422, err.message);
       throw err;
