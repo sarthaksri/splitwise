@@ -84,12 +84,15 @@ export function ExpenseModal({ open, onClose, group, people: peopleProp, expense
   const [extras, setExtras] = useState(emptyExtras);
   const [payers, setPayers] = useState({});
   const [multiPayer, setMultiPayer] = useState(false);
+  // What the last scan found, kept only to show the reconciliation note.
+  const [scan, setScan] = useState(null);
 
   // (Re)seed the form whenever it opens, from the expense being edited or from
   // sensible defaults for a new one.
   useEffect(() => {
     if (!open) return;
     save.reset();
+    setScan(null);
 
     if (expense) {
       const ids = expense.shares.map((s) => String(s.user._id ?? s.user));
@@ -170,6 +173,36 @@ export function ExpenseModal({ open, onClose, group, people: peopleProp, expense
   }, [open, isEdit, peopleKey, user?.id]);
 
   const isItemized = splitType === SPLIT_TYPES.ITEMIZED;
+
+  /**
+   * A bill came back from the scanner: fill the dish rows and the extras.
+   *
+   * Every dish starts shared by the whole group, so a bill the table split
+   * evenly is one tap from saved. Nothing else is touched — the description,
+   * the date and who paid stay yours, and a misread date filing an expense in
+   * the wrong month is a class of error worth not inviting.
+   */
+  function applyScan({ scan: result, reconcile, provider }) {
+    const everyone = people.map((p) => p.id);
+    setSplitType(SPLIT_TYPES.ITEMIZED);
+    setItems(
+      result.items.map((item) => ({
+        key: crypto.randomUUID(),
+        name: item.name,
+        priceCents: item.priceCents,
+        qty: item.qty ?? 1,
+        sharedBy: everyone,
+      })),
+    );
+    setExtras({
+      ...emptyExtras,
+      taxCents: result.taxCents ?? 0,
+      tipCents: result.tipCents ?? 0,
+      otherCents: result.otherCents ?? 0,
+      discountCents: result.discountCents ?? 0,
+    });
+    setScan({ provider, printedCents: reconcile?.printedCents ?? null });
+  }
 
   // For dish-wise the dishes define the total, so the amount field mirrors them.
   const effectiveAmount = useMemo(() => {
@@ -522,6 +555,9 @@ export function ExpenseModal({ open, onClose, group, people: peopleProp, expense
               extras={extras}
               setExtras={setExtras}
               people={people}
+              onScanned={applyScan}
+              scan={scan}
+              onDismissScan={() => setScan(null)}
             />
           )}
         </div>

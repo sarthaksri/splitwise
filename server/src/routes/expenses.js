@@ -8,7 +8,10 @@ import { ApiError, asyncHandler } from '../middleware/error.js';
 import { validate } from '../middleware/validate.js';
 import { requireAuth } from '../middleware/auth.js';
 import { catchUpRecurring } from '../middleware/recurring.js';
+import { scanLimiter } from '../middleware/rateLimit.js';
 import { computeShares, normalizePayers, SPLIT_TYPE_LIST } from '../../../shared/splitEngine.js';
+import { normalizeScan, reconcileScan, ScanError } from '../../../shared/receipt.js';
+import { extractReceipt, GeminiUnavailable, hasGeminiKey } from '../lib/gemini.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -147,6 +150,58 @@ const POPULATE = [
   { path: 'items.sharedBy', select: 'name username avatarColor' },
   { path: 'createdBy', select: 'name username avatarColor' },
 ];
+
+/**
+ * Read a photographed bill into dish rows the form can be prefilled with.
+ *
+ * Nothing is saved here. The response is a suggestion the user reviews and
+ * edits before pressing "Add expense", which is what makes it acceptable for
+ * OCR to be occasionally wrong — a bad read costs a correction, never a wrong
+ * balance.
+ *
+ * The image is read and dropped. It is not written to the database, to disk or
+ * to a log: a bill carries names, card digits and where somebody was on a given
+ * evening, and none of that needs keeping to work out who owes what.
+ */
+const scanSchema = z.object({
+  // ~2.2M base64 characters ≈ 1.6MB of image, comfortably inside the 3mb body
+  // parser mounted for this path and Vercel's 4.5MB request cap.
+  imageBase64: z.string().min(64, 'That image is empty').max(2_200_000, 'That image is too large'),
+  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp'], {
+    message: 'Use a JPEG, PNG or WebP photo',
+  }),
+});
+
+router.post(
+  '/scan',
+  scanLimiter,
+  validate(scanSchema),
+  asyncHandler(async (req, res) => {
+    /*
+     * "No engine available here" is a routine branch, not a failure, so it
+     * answers 200 with a flag rather than an error status. The browser then
+     * runs Tesseract locally. Returning 4xx/5xx would make a working fallback
+     * look like a broken app — the same mistake the CORS rejection made.
+     */
+    if (!hasGeminiKey()) {
+      return res.json({ provider: null, fallback: 'tesseract', reason: 'no-key' });
+    }
+
+    try {
+      const raw = await extractReceipt(req.body);
+      const scan = normalizeScan(raw);
+      return res.json({ provider: 'gemini', scan, reconcile: reconcileScan(scan) });
+    } catch (err) {
+      if (err instanceof GeminiUnavailable) {
+        // Log the reason, never the image.
+        console.warn('[scan] gemini unavailable:', err.message);
+        return res.json({ provider: null, fallback: 'tesseract', reason: 'upstream' });
+      }
+      if (err instanceof ScanError) throw new ApiError(422, err.message);
+      throw err;
+    }
+  }),
+);
 
 router.post(
   '/',

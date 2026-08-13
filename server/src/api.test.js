@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
@@ -760,6 +760,159 @@ describe('expenses and balances', () => {
     });
     const allowed = await aditi.agent.delete(`/api/groups/${groupId}/members/${rahul.user.id}`);
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe('scanning a bill', () => {
+  // A one-pixel JPEG, long enough to clear the minimum-length guard. The
+  // upstream call is stubbed in every test, so the bytes are never looked at.
+  const IMAGE = 'x'.repeat(200);
+  const body = { imageBase64: IMAGE, mimeType: 'image/jpeg' };
+
+  let realFetch;
+  beforeEach(() => {
+    realFetch = globalThis.fetch;
+    delete process.env.GEMINI_API_KEY;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    delete process.env.GEMINI_API_KEY;
+  });
+
+  /** Make the next Gemini call answer with this, without touching the network. */
+  function stubGemini(response) {
+    process.env.GEMINI_API_KEY = 'test-key';
+    globalThis.fetch = async () => response;
+  }
+  const geminiReturns = (payload) =>
+    stubGemini({
+      ok: true,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }],
+      }),
+    });
+
+  it('needs you to be signed in', async () => {
+    const res = await request(app).post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(401);
+  });
+
+  it('asks the browser to do it locally when no key is configured', async () => {
+    const { agent } = await signUp('Aditi');
+    const res = await agent.post('/api/expenses/scan').send(body);
+
+    // Deliberately 200: falling back is a normal outcome, not an error.
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ provider: null, fallback: 'tesseract', reason: 'no-key' });
+  });
+
+  it('returns dishes and extras in paise when Gemini answers', async () => {
+    const { agent } = await signUp('Aditi');
+    geminiReturns({
+      items: [
+        { name: 'Paneer Tikka', qty: 1, price: 320 },
+        { name: 'Butter Naan', qty: 2, price: 90 },
+      ],
+      tax: 25.5,
+      tip: 40,
+      total: 565.5,
+      currency: 'INR',
+    });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toBe('gemini');
+    expect(res.body.scan.items).toEqual([
+      { name: 'Paneer Tikka', qty: 1, priceCents: 32000 },
+      { name: 'Butter Naan', qty: 2, priceCents: 9000 },
+    ]);
+    expect(res.body.scan.taxCents).toBe(2550);
+    expect(res.body.scan.tipCents).toBe(4000);
+    // 32000 + 2×9000 + 2550 + 4000 = 56550, matching the printed total.
+    expect(res.body.reconcile).toMatchObject({ derivedCents: 56550, diffCents: 0 });
+  });
+
+  it('flags a bill whose total disagrees with the lines found', async () => {
+    const { agent } = await signUp('Aditi');
+    geminiReturns({ items: [{ name: 'Thali', price: 250 }], total: 500 });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.body.reconcile.diffCents).toBe(25000);
+  });
+
+  it('falls back rather than erroring when the quota is spent', async () => {
+    const { agent } = await signUp('Aditi');
+    stubGemini({ ok: false, status: 429, text: async () => 'rate limited' });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ provider: null, fallback: 'tesseract', reason: 'upstream' });
+  });
+
+  it('falls back when the model returns something that is not JSON', async () => {
+    const { agent } = await signUp('Aditi');
+    stubGemini({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'Sorry, I cannot.' }] } }] }),
+    });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.body.fallback).toBe('tesseract');
+  });
+
+  it('says so plainly when the photo has no dishes on it', async () => {
+    const { agent } = await signUp('Aditi');
+    geminiReturns({ items: [], total: 500 });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/find any dishes/i);
+  });
+
+  it('rejects anything that is not a photo, and anything too big', async () => {
+    const { agent } = await signUp('Aditi');
+
+    const wrongType = await agent
+      .post('/api/expenses/scan')
+      .send({ imageBase64: IMAGE, mimeType: 'application/pdf' });
+    expect(wrongType.status).toBe(400);
+
+    const tooBig = await agent
+      .post('/api/expenses/scan')
+      .send({ imageBase64: 'x'.repeat(2_200_001), mimeType: 'image/jpeg' });
+    expect(tooBig.status).toBe(400);
+  });
+
+  it('accepts a photo far larger than the 256kb limit the rest of the API has', async () => {
+    const { agent } = await signUp('Aditi');
+    geminiReturns({ items: [{ name: 'Thali', price: 250 }] });
+
+    // ~1.5MB of base64: rejected outright if the scan path shares the global
+    // body limit, which is exactly the regression this guards.
+    const res = await agent
+      .post('/api/expenses/scan')
+      .send({ imageBase64: 'x'.repeat(1_500_000), mimeType: 'image/jpeg' });
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toBe('gemini');
+  });
+
+  it('never sends the API key in the URL', async () => {
+    const { agent } = await signUp('Aditi');
+    process.env.GEMINI_API_KEY = 'super-secret';
+    let seen;
+    globalThis.fetch = async (url, init) => {
+      seen = { url: String(url), init };
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"items":[{"name":"X","price":1}]}' }] } }],
+        }),
+      };
+    };
+
+    await agent.post('/api/expenses/scan').send(body);
+    expect(seen.url).not.toContain('super-secret');
+    expect(seen.init.headers['x-goog-api-key']).toBe('super-secret');
   });
 });
 

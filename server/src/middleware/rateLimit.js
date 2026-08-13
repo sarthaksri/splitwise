@@ -63,6 +63,19 @@ export const registerLimiter = rateLimit({
   message: { error: 'Too many accounts created from here. Try again later.' },
 });
 
+/**
+ * Receipt scans, which cost real quota upstream rather than just CPU.
+ *
+ * Twenty an hour is several bills a night out and nowhere near enough to burn
+ * through a free Gemini tier, deliberately or by a stuck retry loop.
+ */
+export const scanLimiter = rateLimit({
+  ...shared,
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  message: { error: 'That is a lot of bills. Try again in a little while.' },
+});
+
 /** Everything else — generous enough that normal use never notices. */
 export const apiLimiter = rateLimit({
   ...shared,

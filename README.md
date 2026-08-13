@@ -4,7 +4,8 @@ A Splitwise clone on the MERN stack, with three things at its heart:
 
 - **Dish-wise splitting** — enter each dish, tick who ate it, add tax/tip/discount, and
   everyone is charged for exactly what they had. Tax and tip are shared *in proportion to
-  what each person ate*, not split blindly down the middle.
+  what each person ate*, not split blindly down the middle. Or **photograph the bill** and
+  have the dishes and taxes filled in for you.
 - **Simplify debts** — collapse a tangle of who-owes-whom into the fewest payments that
   settle everybody, exactly like the real thing.
 - **Recurring expenses** — rent, the internet bill, a cleaner. Due cycles are created
@@ -145,9 +146,11 @@ Before you hit Deploy, expand **Environment Variables** and add:
 |---|---|
 | `MONGODB_URI` | your Atlas SRV string from step 1 |
 | `JWT_SECRET` | the random string from step 1 |
+| `GEMINI_API_KEY` | *optional* — a free key from [AI Studio](https://aistudio.google.com/apikey), for reading photographed bills |
 
-Apply them to Production, Preview and Development. If you forget, the deploy succeeds but
-every request returns `503 Database unavailable` — add them and redeploy.
+Apply them to Production, Preview and Development. If you forget the first two, the deploy
+succeeds but every request returns `503 Database unavailable` — add them and redeploy.
+Leaving out `GEMINI_API_KEY` is fine: bill scanning falls back to the on-device reader.
 
 ### 5. Deploy, then check it
 
@@ -260,6 +263,37 @@ charged on the full menu price, the way a real bill works.
 So if your dishes were 40% of the food bill, you pay 40% of the GST. In the seeded dinner
 Aditi skips the beer and dessert and owes ₹320.34 of a ₹1,977.30 bill, while the other two
 owe ₹828.48 each — and the three add up to the bill exactly.
+
+### Scanning a bill
+
+On the **By dish** tab, *Scan a bill* opens the rear camera. The photo is rotated using its
+EXIF flag (or OCR reads a sideways receipt as nothing), scaled to 1600px on the long edge,
+and read by whichever engine is available:
+
+| | Engine | Needs | Quality |
+|---|---|---|---|
+| With `GEMINI_API_KEY` | Gemini, server-side | a free key, no card | good on crumpled thermal bills |
+| Without | Tesseract, in your browser | nothing at all | rough; expect to fix rows |
+
+The choice is automatic — the server answers `fallback: "tesseract"` when it has no key or
+the call fails, and the browser takes over. Deliberately a `200`, not an error: falling back
+is a normal outcome, and a working fallback shouldn't look like a broken app.
+
+**The photo is never stored.** It's read and dropped — not written to the database, to disk
+or to a log. With Tesseract it never leaves the device at all.
+
+Two guards, because OCR is wrong sometimes:
+
+- Every scanned dish starts **ticked for everyone**, so a bill the table shared is one tap
+  from saved — and the panel says so, because a dish you forget to untick is charged to
+  people who didn't eat it.
+- The rows are **reconciled against the total printed on the bill**. Drop a line and you get
+  *"the bill says ₹1,240 but these rows come to ₹1,190"*. This is the check that catches a
+  missed dish, which is the failure OCR actually has — it drops lines far more often than it
+  invents them.
+
+Nothing is saved until you press **Add expense**, so a misread costs a correction, never a
+wrong balance.
 
 ### Recurring expenses
 
