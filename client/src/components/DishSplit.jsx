@@ -72,66 +72,84 @@ export function DishSplit({
 
   return (
     <div className="space-y-3">
-      {onScanned && <ScanBillButton onScanned={onScanned} />}
+      {/* The button and the scan notes scroll into view together. Landing on
+          the notes alone pushes the button off the top of the screen, and
+          "add the other half of the bill" is the next thing someone with a
+          long receipt needs to reach. */}
+      <div ref={scanPanel} className="space-y-3">
+        {onScanned && <ScanBillButton onScanned={onScanned} scanned={Boolean(scan)} />}
 
-      {scan && (
-        <div ref={scanPanel} className="space-y-2 rounded-xl border border-line bg-sunken p-3">
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-xs font-semibold text-fg">
-              Filled in from your photo
-              <span className="ml-1.5 font-normal text-fg-subtle">
-                {scan.provider === 'gemini'
-                  ? 'read on your device, tidied up online'
-                  : // Why the rougher path was used. Temporary reasons are worth
-                    // saying, or a poor result looks like the only one this app
-                    // is capable of.
-                    {
-                      upstream: 'read on your device — the online tidy-up was busy',
-                      quota: "read on your device — today's free online tidy-ups are used up",
-                    }[scan.reason] ?? 'read on your device'}
-              </span>
+        {scan && (
+          <div className="space-y-2 rounded-xl border border-line bg-sunken p-3">
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-xs font-semibold text-fg">
+                {scan.pageCount > 1 ? `Filled in from your ${scan.pageCount} photos` : 'Filled in from your photo'}
+                <span className="ml-1.5 font-normal text-fg-subtle">
+                  {scan.provider === 'gemini'
+                    ? 'read on your device, tidied up online'
+                    : // Why the rougher path was used. Temporary reasons are worth
+                      // saying, or a poor result looks like the only one this app
+                      // is capable of.
+                      {
+                        upstream: 'read on your device — the online tidy-up was busy',
+                        quota: "read on your device — today's free online tidy-ups are used up",
+                      }[scan.reason] ?? 'read on your device'}
+                </span>
+              </p>
+              <button
+                type="button"
+                onClick={onDismissScan}
+                className="icon-btn shrink-0 p-1 text-fg-subtle hover:bg-hover hover:text-fg"
+                aria-label="Dismiss scan notes"
+              >
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Every dish starts shared by everyone, so the common case is one
+                tap. The flip side is that a dish you forget to untick is charged
+                to people who didn't eat it — worth saying out loud. */}
+            <p className="text-xs text-fg-muted">
+              Every dish is ticked for everyone. <b>Untick anyone who didn&apos;t have one</b>,
+              and check the prices — a scan gets things wrong sometimes.
             </p>
-            <button
-              type="button"
-              onClick={onDismissScan}
-              className="icon-btn shrink-0 p-1 text-fg-subtle hover:bg-hover hover:text-fg"
-              aria-label="Dismiss scan notes"
-            >
-              <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
-              </svg>
-            </button>
+
+            {printedTotal != null && (
+              <p
+                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium ${
+                  gapCents === 0 ? 'bg-accent-soft text-accent-soft-fg' : 'bg-warn-soft text-warn-fg'
+                }`}
+              >
+                {gapCents === 0 ? (
+                  <>Adds up to the {formatMoney(printedTotal)} printed on the bill ✓</>
+                ) : (
+                  <>
+                    The bill says {formatMoney(printedTotal)} but these rows come to{' '}
+                    {formatMoney(currentTotal)} —{' '}
+                    {gapCents > 0
+                      ? `${formatMoney(gapCents)} short, so a dish or a charge was probably missed.`
+                      : `${formatMoney(-gapCents)} over, so something was probably read twice.`}
+                  </>
+                )}
+              </p>
+            )}
+
+            {/* No printed total means the safety net is missing, and on a bill
+                photographed in pieces that usually means the foot of it hasn't
+                been captured yet. Saying so is what makes the missing green tick
+                legible rather than just absent. */}
+            {printedTotal == null && (
+              <p className="rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs font-medium text-warn-fg">
+                No final total on {scan.pageCount > 1 ? 'these photos' : 'this photo'}, so there is
+                nothing to check the dishes against. Add a photo of the foot of the bill if it was
+                cut off.
+              </p>
+            )}
           </div>
-
-          {/* Every dish starts shared by everyone, so the common case is one
-              tap. The flip side is that a dish you forget to untick is charged
-              to people who didn't eat it — worth saying out loud. */}
-          <p className="text-xs text-fg-muted">
-            Every dish is ticked for everyone. <b>Untick anyone who didn&apos;t have one</b>,
-            and check the prices — a scan gets things wrong sometimes.
-          </p>
-
-          {printedTotal != null && (
-            <p
-              className={`rounded-lg px-2.5 py-1.5 text-xs font-medium ${
-                gapCents === 0 ? 'bg-accent-soft text-accent-soft-fg' : 'bg-warn-soft text-warn-fg'
-              }`}
-            >
-              {gapCents === 0 ? (
-                <>Adds up to the {formatMoney(printedTotal)} printed on the bill ✓</>
-              ) : (
-                <>
-                  The bill says {formatMoney(printedTotal)} but these rows come to{' '}
-                  {formatMoney(currentTotal)} —{' '}
-                  {gapCents > 0
-                    ? `${formatMoney(gapCents)} short, so a dish or a charge was probably missed.`
-                    : `${formatMoney(-gapCents)} over, so something was probably read twice.`}
-                </>
-              )}
-            </p>
-          )}
-        </div>
-      )}
+        )}
+      </div>
 
       <div className="space-y-2">
         {items.map((item, index) => {

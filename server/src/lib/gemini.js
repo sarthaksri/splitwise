@@ -25,7 +25,7 @@
  * explained the bill instead of listing it" failure mode.
  */
 
-import { SCAN_SCHEMA } from '../../../shared/receipt.js';
+import { MAX_PAGES, SCAN_SCHEMA } from '../../../shared/receipt.js';
 
 /**
  * Models to try, in order.
@@ -109,9 +109,14 @@ SUMMARY FIELDS
 - "other": delivery, packing, container or convenience charges.
 - "discount": a positive number meaning the amount taken OFF the bill. A
   negative round-off (e.g. "Round Off -0.30") is a discount of 0.30.
-- "total": the final amount payable. If the bill prints both a subtotal and a
-  net or grand total, "total" is the LARGER, final one.
+- "total": the final amount payable, AS PRINTED. If the bill prints both a
+  subtotal and a net or grand total, "total" is the LARGER, final one.
 - Omit any field the bill does not show. Do not invent numbers.
+- In particular, if no final total is printed — the photo stops short of the
+  foot of the bill — omit "total" rather than adding the items up yourself.
+  The app compares your figures against that total to catch a line you missed,
+  so a total you calculated would agree with you by construction and turn a
+  real check into a rubber stamp.
 
 CHECK YOUR WORK
 
@@ -127,16 +132,60 @@ sum: the app shows the user any discrepancy, and an honest gap is far more
 useful than a fabricated match.`;
 
 /**
- * @param {{text: string}} input the OCR text of one bill
+ * Extra rules for a bill that arrived as several photographs.
+ *
+ * Added only when there is more than one, so the ordinary single-photo scan —
+ * which is most of them — doesn't carry a page of instructions about a
+ * situation it isn't in, and doesn't pay for those tokens out of a small free
+ * allowance.
+ */
+const MULTI_PHOTO_RULES = `SEVERAL PHOTOS OF ONE BILL
+
+The text below comes from more than one photograph, marked "PHOTO 1", "PHOTO 2"
+and so on, in the order they were taken. They are pieces of ONE bill, not
+separate bills — return a single list covering all of them.
+
+- A long receipt is photographed in overlapping pieces, so the last lines of
+  one photo are often the first lines of the next. Where a line plainly repeats
+  because of that overlap, list it ONCE.
+- A dish genuinely ordered twice — printed on two separate lines, each with its
+  own figures, away from the join between photos — is two entries. Do not
+  collapse those.
+- The summary fields describe the whole bill. A total that appears on two
+  photos is still one total; do not add it to itself.
+- A photo may be a blurred or partial shot of lines another one caught cleanly.
+  Prefer the reading that is legible and consistent with the printed total.`;
+
+/**
+ * Lay the photos out for the model.
+ *
+ * One photo keeps the plain "--- BILL TEXT ---" heading it has always had;
+ * numbering a single photo would invite the model to reason about a sequence
+ * that isn't there. Several get numbered markers, which is what the overlap
+ * rules refer to, and the order is the order they were taken.
+ */
+function layOutPages(pages) {
+  if (pages.length === 1) return `--- BILL TEXT ---\n${pages[0]}`;
+  return pages
+    .map((text, i) => `--- PHOTO ${i + 1} of ${pages.length} ---\n${text}`)
+    .join('\n\n');
+}
+
+/**
+ * @param {{pages: string[]}} input the OCR text of one bill, one entry per photo
  * @returns {Promise<object>} a raw scan for `normalizeScan`
  * @throws {GeminiUnavailable}
  */
-export async function structureReceipt({ text }) {
+export async function structureReceipt({ pages }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new GeminiUnavailable('no API key configured');
 
+  const photos = pages.slice(0, MAX_PAGES);
+  const instructions =
+    photos.length > 1 ? `${PROMPT}\n\n${MULTI_PHOTO_RULES}` : PROMPT;
+
   const body = JSON.stringify({
-    contents: [{ parts: [{ text: `${PROMPT}\n\n--- BILL TEXT ---\n${text}` }] }],
+    contents: [{ parts: [{ text: `${instructions}\n\n${layOutPages(photos)}` }] }],
     generationConfig: {
       responseMimeType: 'application/json',
       responseSchema: SCAN_SCHEMA,

@@ -269,12 +269,12 @@ owe ₹828.48 each — and the three add up to the bill exactly.
 On the **By dish** tab, *Scan a bill* opens the rear camera. The work is split in two:
 
 ```
-photo ──► browser: EXIF-rotate, scale to 2200px, Tesseract ──► raw text
-                                                                 │
-                    ┌────────────────────────────────────────────┘
-                    ▼
-   GEMINI_API_KEY?  ──yes──►  server: Gemini structures the text  ──►  dishes
-                    └──no───►  browser: heuristics in shared/receipt.js
+photo(s) ──► browser: EXIF-rotate, scale to 2200px, Tesseract ──► raw text
+                                                                    │
+                       ┌────────────────────────────────────────────┘
+                       ▼
+      GEMINI_API_KEY?  ──yes──►  server: Gemini structures the text  ──►  dishes
+                       └──no───►  browser: heuristics in shared/receipt.js
 ```
 
 **The photograph never leaves your device.** Only the text does, and only when a key is
@@ -321,6 +321,37 @@ result is never mistaken for the best the app can do.
 
 **The photo is never stored.** It's read and dropped — not written to the database, to disk
 or to a log. With Tesseract it never leaves the device at all.
+
+#### A bill that takes more than one photo
+
+A long thermal receipt can't be read in a single shot taken far enough back to fit it all
+in, and some bills run to a second page. Pick several from the gallery at once, or — since a
+camera only ever returns one shot — take one and press **Add another photo**. Up to eight.
+
+Only the new photo is recognised; the text of the earlier ones is kept, so adding a page
+costs one OCR pass rather than all of them. All the pages are then structured **together**,
+in a single request, because deciding where one photo overlaps the next is a judgement about
+the whole bill and can't be made a page at a time.
+
+Overlap is the interesting part. People deliberately overlap their shots so no line falls in
+the gap, which means the last dishes of one photo are the first of the next — and billing
+that seam twice would be silent and plausible. Gemini is told the photos are pieces of one
+bill and asked to list a repeated line once, while keeping a dish genuinely ordered twice.
+The local parser matches the *run of rows at the boundary*, longest first, so it only removes
+rows that repeat in the same order at the join; two identical dishes ordered at different
+points in the meal sit in the middle of the list and survive.
+
+Summary fields take the **largest** value across the photos rather than the sum — a tax block
+caught on two overlapping shots is one tax block. The cost is a tax split across a page
+boundary coming out as the larger half alone, which shows up as a shortfall in the
+reconciliation strip. Double-counting produces no warning at all, so it's the worse way to be
+wrong.
+
+Two smaller things that follow from re-reading the whole bill: the people you have already
+ticked on a dish are **kept** when a later photo arrives (matched on name and price), and a
+scan whose photos never reached the foot of the bill says *"no final total on these photos,
+so there is nothing to check the dishes against"* rather than showing a green tick against a
+total the model added up itself.
 
 Two guards, because OCR is wrong sometimes:
 

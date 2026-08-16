@@ -29,6 +29,12 @@ export class ScanError extends Error {
 const MAX_NAME = 80;
 /** More lines than any real bill — a guard against a runaway parse. */
 const MAX_ITEMS = 120;
+/**
+ * Photographs of one bill. A long thermal receipt takes two or three shots to
+ * capture legibly, and a table that ordered all evening can print a second
+ * page; past that, someone is scanning something other than a bill.
+ */
+export const MAX_PAGES = 8;
 
 /**
  * The JSON contract we ask Gemini for, and the shape `parseReceiptText`
@@ -187,10 +193,19 @@ const SUMMARY_PATTERNS = [
   { field: 'other', re: /\b(delivery|packing|packaging|container|convenience|round[\s-]*off)\b/i, sum: true },
   { field: 'discount', re: /\b(discount|less|off|promo|coupon)\b/i },
   { field: 'tip', re: /\b(tip|gratuity|service\s*charge|svc\s*chg)\b/i },
-  // Indian bills split the tax across CGST and SGST lines (and sometimes a
-  // cess), so these have to be added up. Keeping only the last one silently
-  // halves the tax — the kind of error that looks entirely plausible on screen.
-  { field: 'tax', re: /\b(cgst|sgst|igst|gst|vat|service\s*tax|cess|tax)\b/i, sum: true },
+  /*
+   * Indian bills split the tax across CGST and SGST lines (and sometimes a
+   * cess), so these have to be added up. Keeping only the last one silently
+   * halves the tax — the kind of error that looks entirely plausible on screen.
+   *
+   * The trailing alternative catches a rate line whose keyword OCR has
+   * destroyed: "CGST 2.5%" comes back as "CEST 2.:5%" and "SGST 2.5%" as
+   * "SESE 21.5%", and a rule about words cannot survive that while a rule
+   * about shape can. Anything charged as a percentage this far down a bill is
+   * a tax, and the patterns for discounts and service charges are tried first,
+   * so "10% off" and "Service Charge 10%" are still read as what they are.
+   */
+  { field: 'tax', re: /\b(cgst|sgst|igst|gst|vat|service\s*tax|cess|tax)\b|\d\s*%/i, sum: true },
   { field: 'subtotal', re: /\b(sub\s*total|sub-total)\b/i },
   { field: 'total', re: /\b(grand\s*total|net\s*(payable|amount)|total\s*(due|payable|amount)?|amount\s*payable|bill\s*amount)\b/i },
 ];
@@ -416,4 +431,94 @@ export function parseReceiptText(text) {
   else if (/€/.test(text)) raw.currency = 'EUR';
 
   return raw;
+}
+
+// --- several photographs of one bill -----------------------------------------
+
+/**
+ * How two rows are judged to be "the same line printed twice".
+ *
+ * Name, quantity and price together — not the name alone, because a table
+ * genuinely can order the same dish on two separate lines at different times,
+ * and those come out identical only when they really are duplicates.
+ */
+function itemKey(item) {
+  const name = String(item?.name ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return `${name}|${item?.qty ?? 1}|${item?.price ?? ''}`;
+}
+
+/**
+ * Drop the part of `next` that is already the tail of `soFar`.
+ *
+ * People photograph a long receipt in overlapping pieces — deliberately, so no
+ * line falls in the crack between two shots — which means the last few dishes
+ * of one photo are the first few of the next. Concatenating naively bills those
+ * dishes twice.
+ *
+ * The overlap is matched as a *run at the boundary*, longest first, so it only
+ * ever removes rows that repeat in the same order at the join. Two identical
+ * dishes ordered at different points in the meal sit in the middle of the list,
+ * never at the seam, and survive untouched.
+ */
+function dropOverlap(soFar, next) {
+  for (let k = Math.min(soFar.length, next.length); k > 0; k--) {
+    const tail = soFar.slice(soFar.length - k).map(itemKey).join('\n');
+    const head = next.slice(0, k).map(itemKey).join('\n');
+    if (tail === head) return next.slice(k);
+  }
+  return next;
+}
+
+/**
+ * Fold the scans of several photos into the one bill they came from.
+ *
+ * Items are concatenated with the boundary overlap removed. The summary fields
+ * take the **largest** value seen rather than the sum, which is the right rule
+ * for photos of the same piece of paper: the tax block usually appears on the
+ * last shot only, but when two shots overlap it appears on both, and adding
+ * them would double a figure the user has no reason to re-check.
+ *
+ * The cost of `max` is a tax split across a page boundary — CGST at the foot of
+ * one photo, SGST at the head of the next — which comes out as the larger half
+ * alone. That leaves a shortfall against the printed total, which the
+ * reconciliation strip shows in as many words. Double-counting produces no
+ * warning at all, so it is the worse way to be wrong.
+ *
+ * @param {object[]} raws raw scans, in the order the photos were taken
+ * @returns {object} a single raw scan for `normalizeScan`
+ */
+export function mergeRawScans(raws) {
+  const merged = { items: [], currency: 'INR' };
+
+  for (const raw of raws) {
+    if (!raw || typeof raw !== 'object') continue;
+    const items = Array.isArray(raw.items) ? raw.items : [];
+    merged.items.push(...dropOverlap(merged.items, items));
+
+    for (const field of ['tax', 'tip', 'other', 'discount', 'total']) {
+      const value = Number(raw[field]);
+      if (!Number.isFinite(value)) continue;
+      merged[field] = Math.max(merged[field] ?? 0, value);
+    }
+    if (raw.currency && raw.currency !== 'INR') merged.currency = raw.currency;
+  }
+
+  return merged;
+}
+
+/**
+ * The local engine's answer for one bill photographed several times.
+ *
+ * Each photo is parsed on its own before merging, rather than parsing one
+ * concatenated blob. The line-by-line heuristics carry state across lines — a
+ * dish name waiting for the figures printed underneath it — and running that
+ * state off the end of one photo and into the header of the next pairs a dish
+ * with somebody else's numbers.
+ *
+ * @param {string[]} pages raw OCR text, one entry per photo, in order
+ * @returns {object} a raw scan, ready for `normalizeScan`
+ */
+export function parseReceiptPages(pages) {
+  const texts = (Array.isArray(pages) ? pages : [pages]).slice(0, MAX_PAGES);
+  return mergeRawScans(texts.map((text) => parseReceiptText(text)));
 }

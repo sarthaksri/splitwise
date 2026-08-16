@@ -182,18 +182,34 @@ export function ExpenseModal({ open, onClose, group, people: peopleProp, expense
    * the date and who paid stay yours, and a misread date filing an expense in
    * the wrong month is a class of error worth not inviting.
    */
-  function applyScan({ scan: result, reconcile, provider, reason }) {
+  function applyScan({ scan: result, reconcile, provider, reason, pages }) {
     const everyone = people.map((p) => p.id);
     setSplitType(SPLIT_TYPES.ITEMIZED);
-    setItems(
-      result.items.map((item) => ({
+    setItems((previous) => {
+      /*
+       * Adding a second photo re-reads the whole bill, which would otherwise
+       * throw away the ticking already done on the dishes from the first one —
+       * so a bill photographed in two halves would mean assigning the first
+       * half twice. A dish that comes back with the same name and price is the
+       * same dish, and keeps whoever was ticked for it.
+       */
+      const previousSharers = new Map();
+      for (const item of previous) {
+        const key = `${item.name.trim().toLowerCase()}|${item.priceCents}`;
+        if (item.name.trim() && !previousSharers.has(key)) {
+          previousSharers.set(key, item.sharedBy);
+        }
+      }
+
+      return result.items.map((item) => ({
         key: crypto.randomUUID(),
         name: item.name,
         priceCents: item.priceCents,
         qty: item.qty ?? 1,
-        sharedBy: everyone,
-      })),
-    );
+        sharedBy:
+          previousSharers.get(`${item.name.trim().toLowerCase()}|${item.priceCents}`) ?? everyone,
+      }));
+    });
     setExtras({
       ...emptyExtras,
       taxCents: result.taxCents ?? 0,
@@ -201,7 +217,12 @@ export function ExpenseModal({ open, onClose, group, people: peopleProp, expense
       otherCents: result.otherCents ?? 0,
       discountCents: result.discountCents ?? 0,
     });
-    setScan({ provider, reason, printedCents: reconcile?.printedCents ?? null });
+    setScan({
+      provider,
+      reason,
+      printedCents: reconcile?.printedCents ?? null,
+      pageCount: pages?.length ?? 1,
+    });
   }
 
   // For dish-wise the dishes define the total, so the amount field mirrors them.

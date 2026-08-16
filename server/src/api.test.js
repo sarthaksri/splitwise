@@ -889,6 +889,88 @@ describe('scanning a bill', () => {
 
     const huge = await agent.post('/api/expenses/scan').send({ text: 'x'.repeat(20_001) });
     expect(huge.status).toBe(400);
+
+    const nothing = await agent.post('/api/expenses/scan').send({ pages: [] });
+    expect(nothing.status).toBe(400);
+  });
+
+  it('takes a bill photographed in several pieces as one bill', async () => {
+    const { agent } = await signUp('Aditi');
+    let sent;
+    process.env.GEMINI_API_KEY = 'test-key';
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      items: [
+                        { name: 'Paneer Tikka', qty: 1, price: 320 },
+                        { name: 'Butter Naan', qty: 2, price: 90 },
+                      ],
+                      total: 500,
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    };
+
+    const res = await agent
+      .post('/api/expenses/scan')
+      .send({ pages: ['1 Paneer Tikka 320.00', '2 Butter Naan 90.00\nGrand Total 500.00'] });
+
+    expect(res.status).toBe(200);
+    // One request carrying both photos, marked and in order — the model can
+    // only spot the overlap between two shots if it sees them together.
+    expect(sent.contents).toHaveLength(1);
+    const prompt = sent.contents[0].parts[0].text;
+    expect(prompt).toContain('--- PHOTO 1 of 2 ---');
+    expect(prompt).toContain('--- PHOTO 2 of 2 ---');
+    // And it is told what overlapping shots mean, or it bills the seam twice.
+    expect(prompt).toContain('SEVERAL PHOTOS OF ONE BILL');
+    expect(prompt.indexOf('Paneer Tikka')).toBeLessThan(prompt.indexOf('Butter Naan'));
+    // One list of dishes back, not one per photo.
+    expect(res.body.scan.items).toHaveLength(2);
+  });
+
+  it('does not talk about photo numbers when there is only one photo', async () => {
+    const { agent } = await signUp('Aditi');
+    let sent;
+    process.env.GEMINI_API_KEY = 'test-key';
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"items":[{"name":"X","price":1}]}' }] } }],
+        }),
+      };
+    };
+
+    await agent.post('/api/expenses/scan').send({ pages: ['1 Paneer Tikka 320.00'] });
+    const prompt = sent.contents[0].parts[0].text;
+    expect(prompt).toContain('--- BILL TEXT ---');
+    expect(prompt).not.toContain('--- PHOTO');
+    // The overlap rules are a page of instructions about a situation this scan
+    // is not in — and tokens out of a small free allowance.
+    expect(prompt).not.toContain('SEVERAL PHOTOS OF ONE BILL');
+  });
+
+  it('refuses more photos than any bill needs', async () => {
+    const { agent } = await signUp('Aditi');
+    const res = await agent
+      .post('/api/expenses/scan')
+      .send({ pages: Array.from({ length: 9 }, (_, i) => `Photo ${i} 100.00`) });
+    expect(res.status).toBe(400);
   });
 
   it('sends the bill text to the model, and never a photograph', async () => {

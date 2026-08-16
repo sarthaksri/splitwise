@@ -10,7 +10,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { catchUpRecurring } from '../middleware/recurring.js';
 import { scanLimiter } from '../middleware/rateLimit.js';
 import { computeShares, normalizePayers, SPLIT_TYPE_LIST } from '../../../shared/splitEngine.js';
-import { normalizeScan, reconcileScan, ScanError } from '../../../shared/receipt.js';
+import { MAX_PAGES, normalizeScan, reconcileScan, ScanError } from '../../../shared/receipt.js';
 import { structureReceipt, GeminiUnavailable, hasGeminiKey } from '../lib/gemini.js';
 
 const router = Router();
@@ -159,15 +159,30 @@ const POPULATE = [
  * digits and the record of where somebody was on a Friday night stay on their
  * phone. Nothing here is stored either way.
  *
+ * A bill can arrive as several photos: a long receipt needs more than one shot
+ * to stay legible. They come as one request, in order, because working out
+ * where one photo overlaps the next is a judgement about the bill as a whole.
+ *
  * Nothing is saved as an expense either. The response is a suggestion the user
  * reviews and edits before pressing "Add expense", which is what makes it
  * acceptable for OCR to be occasionally wrong — a bad read costs a correction,
  * never a wrong balance.
  */
-const scanSchema = z.object({
-  // Far more than the longest bill; a guard against someone posting a novel.
-  text: z.string().trim().min(8, "That photo didn't have any readable text on it").max(20_000),
-});
+const NO_TEXT = "That photo didn't have any readable text on it";
+// Far more than the longest bill; a guard against someone posting a novel.
+const pageText = z.string().trim().min(8, NO_TEXT).max(20_000);
+
+const scanSchema = z
+  .object({
+    // One entry per photograph, in the order they were taken: a long receipt
+    // takes several shots, and the model is told to treat them as one bill.
+    pages: z.array(pageText).min(1, NO_TEXT).max(MAX_PAGES).optional(),
+    // The original single-photo shape, still accepted so an older client — a
+    // phone with the app open since before this deployed — keeps working.
+    text: pageText.optional(),
+  })
+  .transform(({ pages, text }) => ({ pages: pages ?? (text ? [text] : []) }))
+  .refine((body) => body.pages.length > 0, { message: NO_TEXT, path: ['pages'] });
 
 router.post(
   '/scan',

@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeScan, parseReceiptText, reconcileScan, ScanError } from './receipt.js';
+import {
+  mergeRawScans,
+  normalizeScan,
+  parseReceiptPages,
+  parseReceiptText,
+  reconcileScan,
+  ScanError,
+} from './receipt.js';
 
 describe('normalizeScan', () => {
   it('turns a model response into integer paise', () => {
@@ -346,5 +353,138 @@ describe('parseReceiptText', () => {
     expect(() => parseReceiptText('~~~ ### ...')).not.toThrow();
     expect(parseReceiptText('~~~ ### ...').items).toEqual([]);
     expect(() => parseReceiptText(null)).not.toThrow();
+  });
+});
+
+describe('a bill photographed in several pieces', () => {
+  // A long receipt shot in two overlapping halves. The photographer aimed to
+  // overlap — otherwise a line falls in the gap between the two shots — so
+  // "Butter Naan" and "Dal Makhani" appear on both.
+  const topHalf = `
+    Red Rhino
+    Paneer Tikka          320.00
+    Butter Naan            45.00
+    Dal Makhani           280.00
+  `;
+  const bottomHalf = `
+    Butter Naan            45.00
+    Dal Makhani           280.00
+    Gulab Jamun           120.00
+    Sub Total             765.00
+    CGST 2.5%              19.13
+    SGST 2.5%              19.13
+    Net Amount            803.26
+  `;
+
+  it('reads one bill out of two overlapping photos', () => {
+    const raw = parseReceiptPages([topHalf, bottomHalf]);
+    expect(raw.items.map((i) => i.name)).toEqual([
+      'Paneer Tikka',
+      'Butter Naan',
+      'Dal Makhani',
+      'Gulab Jamun',
+    ]);
+    expect(raw.total).toBe(803.26);
+  });
+
+  it('charges a dish photographed twice only once', () => {
+    const both = parseReceiptPages([topHalf, bottomHalf]);
+    const scan = normalizeScan(both);
+    const dishes = scan.items.reduce((sum, i) => sum + i.priceCents * i.qty, 0);
+    // 320 + 45 + 280 + 120, each at qty 1 — not the 645 a naive concatenation
+    // would produce by billing the overlap twice.
+    expect(dishes).toBe(76500);
+  });
+
+  it('does not double the tax that appears on both photos', () => {
+    // 19.13 + 19.13 summed within one photo; not added again for the second.
+    const overlapping = parseReceiptPages([bottomHalf, bottomHalf]);
+    expect(overlapping.tax).toBeCloseTo(38.26, 2);
+  });
+
+  it('reconciles the whole bill against the total printed on the last photo', () => {
+    const scan = normalizeScan(parseReceiptPages([topHalf, bottomHalf]));
+    const { diffCents } = reconcileScan(scan);
+    // 76500 dishes + 3826 tax = 80326, exactly the printed Net Amount.
+    expect(diffCents).toBe(0);
+  });
+
+  it('keeps a dish genuinely ordered twice at different points in the meal', () => {
+    // Two rounds of the same drink, printed apart from each other rather than
+    // repeated at the seam between photos.
+    const raw = parseReceiptPages([
+      `
+        Beer                  250.00
+        Peanuts               100.00
+        Beer                  250.00
+      `,
+    ]);
+    expect(raw.items.map((i) => i.name)).toEqual(['Beer', 'Peanuts', 'Beer']);
+  });
+
+  it('reads a bill that simply continues onto a second page', () => {
+    // No overlap at all: page two carries on where page one stopped.
+    const raw = parseReceiptPages([
+      'Soup                  150.00',
+      `
+        Biryani               400.00
+        Total                 550.00
+      `,
+    ]);
+    expect(raw.items.map((i) => i.name)).toEqual(['Soup', 'Biryani']);
+    expect(raw.total).toBe(550);
+  });
+
+  it('behaves exactly like the single-photo parser when given one photo', () => {
+    expect(parseReceiptPages([topHalf])).toEqual(parseReceiptText(topHalf));
+  });
+
+  it('ignores a photo that came back empty rather than losing the others', () => {
+    const raw = parseReceiptPages(['Soup 150.00', '', '   ']);
+    expect(raw.items).toHaveLength(1);
+  });
+
+  it('takes the larger reading of a summary line, never the sum', () => {
+    // The same total, read once cleanly and once with a digit dropped.
+    const merged = mergeRawScans([{ items: [], total: 803.26 }, { items: [], total: 80.26 }]);
+    expect(merged.total).toBe(803.26);
+  });
+
+  it('stops at a sane number of photos', () => {
+    const pages = Array.from({ length: 12 }, (_, i) => `Dish${i} 10.00`);
+    expect(parseReceiptPages(pages).items).toHaveLength(8);
+  });
+
+  it('survives nonsense in the list without throwing', () => {
+    expect(() => mergeRawScans([null, undefined, 'nope', { items: null }])).not.toThrow();
+    expect(mergeRawScans([]).items).toEqual([]);
+  });
+});
+
+describe('a tax line whose keyword OCR destroyed', () => {
+  it('still reads it as tax, by the percentage on it', () => {
+    // Exactly what Tesseract returned for a rendered "CGST 2.5% / SGST 2.5%".
+    const raw = parseReceiptText(`
+      Kulfi                 110.00
+      Sub Total            1440.00
+      CEST 2.:5%             36.00
+      SESE 21.5%             36.00
+      Grand Total          1512.00
+    `);
+    expect(raw.tax).toBe(72);
+    // And it is not offered as something somebody ate.
+    expect(raw.items.map((i) => i.name)).toEqual(['Kulfi']);
+  });
+
+  it('does not steal a percentage discount or a service charge', () => {
+    const raw = parseReceiptText(`
+      Pizza                 400.00
+      Service Charge 10%     40.00
+      Discount 5%           -20.00
+      Total                 420.00
+    `);
+    expect(raw.tip).toBe(40);
+    expect(raw.discount).toBe(20);
+    expect(raw.tax).toBeUndefined();
   });
 });
