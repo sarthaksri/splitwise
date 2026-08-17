@@ -8,7 +8,10 @@ import { ApiError, asyncHandler } from '../middleware/error.js';
 import { validate } from '../middleware/validate.js';
 import { requireAuth } from '../middleware/auth.js';
 import { catchUpRecurring } from '../middleware/recurring.js';
+import { scanLimiter } from '../middleware/rateLimit.js';
 import { computeShares, normalizePayers, SPLIT_TYPE_LIST } from '../../../shared/splitEngine.js';
+import { MAX_PAGES, normalizeScan, reconcileScan, ScanError } from '../../../shared/receipt.js';
+import { structureReceipt, GeminiUnavailable, hasGeminiKey } from '../lib/gemini.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -147,6 +150,71 @@ const POPULATE = [
   { path: 'items.sharedBy', select: 'name username avatarColor' },
   { path: 'createdBy', select: 'name username avatarColor' },
 ];
+
+/**
+ * Turn the OCR text of a bill into dish rows the form can be prefilled with.
+ *
+ * The browser does the reading — Tesseract on the photo — and sends only the
+ * text it got. So the photograph never reaches this server, and a bill's card
+ * digits and the record of where somebody was on a Friday night stay on their
+ * phone. Nothing here is stored either way.
+ *
+ * A bill can arrive as several photos: a long receipt needs more than one shot
+ * to stay legible. They come as one request, in order, because working out
+ * where one photo overlaps the next is a judgement about the bill as a whole.
+ *
+ * Nothing is saved as an expense either. The response is a suggestion the user
+ * reviews and edits before pressing "Add expense", which is what makes it
+ * acceptable for OCR to be occasionally wrong — a bad read costs a correction,
+ * never a wrong balance.
+ */
+const NO_TEXT = "That photo didn't have any readable text on it";
+// Far more than the longest bill; a guard against someone posting a novel.
+const pageText = z.string().trim().min(8, NO_TEXT).max(20_000);
+
+const scanSchema = z
+  .object({
+    // One entry per photograph, in the order they were taken: a long receipt
+    // takes several shots, and the model is told to treat them as one bill.
+    pages: z.array(pageText).min(1, NO_TEXT).max(MAX_PAGES).optional(),
+    // The original single-photo shape, still accepted so an older client — a
+    // phone with the app open since before this deployed — keeps working.
+    text: pageText.optional(),
+  })
+  .transform(({ pages, text }) => ({ pages: pages ?? (text ? [text] : []) }))
+  .refine((body) => body.pages.length > 0, { message: NO_TEXT, path: ['pages'] });
+
+router.post(
+  '/scan',
+  scanLimiter,
+  validate(scanSchema),
+  asyncHandler(async (req, res) => {
+    /*
+     * "No engine available here" is a routine branch, not a failure, so it
+     * answers 200 with a flag rather than an error status. The browser then
+     * parses the text itself with the heuristics in shared/receipt.js.
+     * Returning 4xx/5xx would make a working fallback look like a broken app —
+     * the same mistake the CORS rejection made.
+     */
+    if (!hasGeminiKey()) {
+      return res.json({ provider: null, fallback: 'local', reason: 'no-key' });
+    }
+
+    try {
+      const scan = normalizeScan(await structureReceipt(req.body));
+      return res.json({ provider: 'gemini', scan, reconcile: reconcileScan(scan) });
+    } catch (err) {
+      if (err instanceof GeminiUnavailable) {
+        console.warn('[scan] gemini unavailable:', err.message);
+        return res.json({ provider: null, fallback: 'local', reason: err.kind ?? 'upstream' });
+      }
+      // The model read the text and found no food on it. The local parser would
+      // reach the same conclusion from the same characters, so say so directly.
+      if (err instanceof ScanError) throw new ApiError(422, err.message);
+      throw err;
+    }
+  }),
+);
 
 router.post(
   '/',

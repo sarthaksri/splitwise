@@ -4,7 +4,8 @@ A Splitwise clone on the MERN stack, with three things at its heart:
 
 - **Dish-wise splitting** — enter each dish, tick who ate it, add tax/tip/discount, and
   everyone is charged for exactly what they had. Tax and tip are shared *in proportion to
-  what each person ate*, not split blindly down the middle.
+  what each person ate*, not split blindly down the middle. Or **photograph the bill** and
+  have the dishes and taxes filled in for you.
 - **Simplify debts** — collapse a tangle of who-owes-whom into the fewest payments that
   settle everybody, exactly like the real thing.
 - **Recurring expenses** — rent, the internet bill, a cleaner. Due cycles are created
@@ -145,9 +146,11 @@ Before you hit Deploy, expand **Environment Variables** and add:
 |---|---|
 | `MONGODB_URI` | your Atlas SRV string from step 1 |
 | `JWT_SECRET` | the random string from step 1 |
+| `GEMINI_API_KEY` | *optional* — a free key from [AI Studio](https://aistudio.google.com/apikey), for reading photographed bills |
 
-Apply them to Production, Preview and Development. If you forget, the deploy succeeds but
-every request returns `503 Database unavailable` — add them and redeploy.
+Apply them to Production, Preview and Development. If you forget the first two, the deploy
+succeeds but every request returns `503 Database unavailable` — add them and redeploy.
+Leaving out `GEMINI_API_KEY` is fine: bill scanning falls back to the on-device reader.
 
 ### 5. Deploy, then check it
 
@@ -260,6 +263,108 @@ charged on the full menu price, the way a real bill works.
 So if your dishes were 40% of the food bill, you pay 40% of the GST. In the seeded dinner
 Aditi skips the beer and dessert and owes ₹320.34 of a ₹1,977.30 bill, while the other two
 owe ₹828.48 each — and the three add up to the bill exactly.
+
+### Scanning a bill
+
+On the **By dish** tab, *Scan a bill* opens the rear camera. The work is split in two:
+
+```
+photo(s) ──► browser: EXIF-rotate, scale to 2200px, Tesseract ──► raw text
+                                                                    │
+                       ┌────────────────────────────────────────────┘
+                       ▼
+      GEMINI_API_KEY?  ──yes──►  server: Gemini structures the text  ──►  dishes
+                       └──no───►  browser: heuristics in shared/receipt.js
+```
+
+**The photograph never leaves your device.** Only the text does, and only when a key is
+configured. A bill carries card digits and a record of where you were on a Friday night, and
+none of that is needed to work out who owes what.
+
+Recognising on the device and reasoning in the cloud is also the only combination that
+currently *works*, and it's much cheaper:
+
+| | Text (what this does) | Image (what it did first) |
+|---|---|---|
+| Latency | **2.1s**, measured end to end | 18–306s, then a 503 |
+| Tokens | a few hundred | a few thousand |
+| Layout handling | the model reads collapsed columns | the model sees the page |
+
+Bill layouts differ wildly between restaurants, and a language model reading the text copes
+with shapes no regex anticipates — a dish name on one line with its figures on the next, a
+Qty/Rate/Amount table, taxes split across CGST and SGST lines. The prompt asks it to check
+its own arithmetic against the printed total, and explicitly *not* to fudge a number to
+force the sum: an honest gap is more useful than a fabricated match, because the app shows
+you the gap.
+
+Without a key the same text goes through the heuristics in `shared/receipt.js`, which handle
+the common Indian POS formats and are covered by tests. The server answers
+`fallback: "local"` — a `200`, not an error, because falling back is a normal outcome and a
+working fallback shouldn't look like a broken app.
+
+Gemini is tried as a short chain — `gemini-3.1-flash-lite`, then `gemini-flash-latest` —
+with 8 seconds per model and 18 for the lot. Every part of that is a scar:
+
+- **Lite leads on quota, not quality.** The free tier gives it 500 requests/day at 15/min,
+  against 20/day at 5/min for the full Flash models — and that is *one project key shared by
+  every user of the deployment*. Twenty scans a day is about seven dinners for the whole app.
+  Set `GEMINI_MODEL=gemini-3.6-flash` to trade volume for accuracy.
+- **Two models, not five.** Each attempt spends a request from a small pot.
+- **A pinned model gets retired.** `gemini-2.5-flash` now answers 404 for new keys, which
+  silently demoted every scan to the on-device reader.
+- **Bail fast anyway.** Text is quick, but a saturated endpoint doesn't refuse quickly, and
+  waiting is worse than reading it locally.
+
+The panel says which path ran and why: *"read on your device, tidied up online"*, or *"the
+online tidy-up was busy"*, or *"today's free online tidy-ups are used up"* — so a rougher
+result is never mistaken for the best the app can do.
+
+**The photo is never stored.** It's read and dropped — not written to the database, to disk
+or to a log. With Tesseract it never leaves the device at all.
+
+#### A bill that takes more than one photo
+
+A long thermal receipt can't be read in a single shot taken far enough back to fit it all
+in, and some bills run to a second page. Pick several from the gallery at once, or — since a
+camera only ever returns one shot — take one and press **Add another photo**. Up to eight.
+
+Only the new photo is recognised; the text of the earlier ones is kept, so adding a page
+costs one OCR pass rather than all of them. All the pages are then structured **together**,
+in a single request, because deciding where one photo overlaps the next is a judgement about
+the whole bill and can't be made a page at a time.
+
+Overlap is the interesting part. People deliberately overlap their shots so no line falls in
+the gap, which means the last dishes of one photo are the first of the next — and billing
+that seam twice would be silent and plausible. Gemini is told the photos are pieces of one
+bill and asked to list a repeated line once, while keeping a dish genuinely ordered twice.
+The local parser matches the *run of rows at the boundary*, longest first, so it only removes
+rows that repeat in the same order at the join; two identical dishes ordered at different
+points in the meal sit in the middle of the list and survive.
+
+Summary fields take the **largest** value across the photos rather than the sum — a tax block
+caught on two overlapping shots is one tax block. The cost is a tax split across a page
+boundary coming out as the larger half alone, which shows up as a shortfall in the
+reconciliation strip. Double-counting produces no warning at all, so it's the worse way to be
+wrong.
+
+Two smaller things that follow from re-reading the whole bill: the people you have already
+ticked on a dish are **kept** when a later photo arrives (matched on name and price), and a
+scan whose photos never reached the foot of the bill says *"no final total on these photos,
+so there is nothing to check the dishes against"* rather than showing a green tick against a
+total the model added up itself.
+
+Two guards, because OCR is wrong sometimes:
+
+- Every scanned dish starts **ticked for everyone**, so a bill the table shared is one tap
+  from saved — and the panel says so, because a dish you forget to untick is charged to
+  people who didn't eat it.
+- The rows are **reconciled against the total printed on the bill**. Drop a line and you get
+  *"the bill says ₹1,240 but these rows come to ₹1,190"*. This is the check that catches a
+  missed dish, which is the failure OCR actually has — it drops lines far more often than it
+  invents them.
+
+Nothing is saved until you press **Add expense**, so a misread costs a correction, never a
+wrong balance.
 
 ### Recurring expenses
 

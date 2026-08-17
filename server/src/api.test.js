@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
@@ -760,6 +760,258 @@ describe('expenses and balances', () => {
     });
     const allowed = await aditi.agent.delete(`/api/groups/${groupId}/members/${rahul.user.id}`);
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe('scanning a bill', () => {
+  // The OCR text of a bill, as the browser would send it. The upstream call is
+  // stubbed in every test, so the wording never actually reaches a model.
+  const body = {
+    text: ['1 Paneer Tikka 320.00', '2 Butter Naan 90.00', 'Grand Total 500.00'].join('\n'),
+  };
+
+  let realFetch;
+  beforeEach(() => {
+    realFetch = globalThis.fetch;
+    delete process.env.GEMINI_API_KEY;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    delete process.env.GEMINI_API_KEY;
+  });
+
+  /** Make the next Gemini call answer with this, without touching the network. */
+  function stubGemini(response) {
+    process.env.GEMINI_API_KEY = 'test-key';
+    globalThis.fetch = async () => response;
+  }
+  const geminiReturns = (payload) =>
+    stubGemini({
+      ok: true,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }],
+      }),
+    });
+
+  it('needs you to be signed in', async () => {
+    const res = await request(app).post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(401);
+  });
+
+  it('asks the browser to do it locally when no key is configured', async () => {
+    const { agent } = await signUp('Aditi');
+    const res = await agent.post('/api/expenses/scan').send(body);
+
+    // Deliberately 200: falling back is a normal outcome, not an error.
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ provider: null, fallback: 'local', reason: 'no-key' });
+  });
+
+  it('returns dishes and extras in paise when Gemini answers', async () => {
+    const { agent } = await signUp('Aditi');
+    geminiReturns({
+      items: [
+        { name: 'Paneer Tikka', qty: 1, price: 320 },
+        { name: 'Butter Naan', qty: 2, price: 90 },
+      ],
+      tax: 25.5,
+      tip: 40,
+      total: 565.5,
+      currency: 'INR',
+    });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toBe('gemini');
+    expect(res.body.scan.items).toEqual([
+      { name: 'Paneer Tikka', qty: 1, priceCents: 32000 },
+      { name: 'Butter Naan', qty: 2, priceCents: 9000 },
+    ]);
+    expect(res.body.scan.taxCents).toBe(2550);
+    expect(res.body.scan.tipCents).toBe(4000);
+    // 32000 + 2×9000 + 2550 + 4000 = 56550, matching the printed total.
+    expect(res.body.reconcile).toMatchObject({ derivedCents: 56550, diffCents: 0 });
+  });
+
+  it('flags a bill whose total disagrees with the lines found', async () => {
+    const { agent } = await signUp('Aditi');
+    geminiReturns({ items: [{ name: 'Thali', price: 250 }], total: 500 });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.body.reconcile.diffCents).toBe(25000);
+  });
+
+  it('falls back rather than erroring when the free allowance is spent', async () => {
+    const { agent } = await signUp('Aditi');
+    stubGemini({ ok: false, status: 429, text: async () => 'rate limited' });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(200);
+    // 'quota', not the generic 'upstream': the free tier resetting tomorrow is
+    // a different thing to tell someone than a capacity blip clearing in
+    // minutes, and the panel says which.
+    expect(res.body).toMatchObject({ provider: null, fallback: 'local', reason: 'quota' });
+  });
+
+  it('reports a busy upstream as temporary, not as spent quota', async () => {
+    const { agent } = await signUp('Aditi');
+    stubGemini({ ok: false, status: 503, text: async () => 'high demand' });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.body).toMatchObject({ fallback: 'local', reason: 'upstream' });
+  });
+
+  it('falls back when the model returns something that is not JSON', async () => {
+    const { agent } = await signUp('Aditi');
+    stubGemini({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'Sorry, I cannot.' }] } }] }),
+    });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.body.fallback).toBe('local');
+  });
+
+  it('says so plainly when the photo has no dishes on it', async () => {
+    const { agent } = await signUp('Aditi');
+    geminiReturns({ items: [], total: 500 });
+
+    const res = await agent.post('/api/expenses/scan').send(body);
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/find any dishes/i);
+  });
+
+  it('rejects an empty read and refuses a novel', async () => {
+    const { agent } = await signUp('Aditi');
+
+    const empty = await agent.post('/api/expenses/scan').send({ text: '  ' });
+    expect(empty.status).toBe(400);
+
+    const huge = await agent.post('/api/expenses/scan').send({ text: 'x'.repeat(20_001) });
+    expect(huge.status).toBe(400);
+
+    const nothing = await agent.post('/api/expenses/scan').send({ pages: [] });
+    expect(nothing.status).toBe(400);
+  });
+
+  it('takes a bill photographed in several pieces as one bill', async () => {
+    const { agent } = await signUp('Aditi');
+    let sent;
+    process.env.GEMINI_API_KEY = 'test-key';
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      items: [
+                        { name: 'Paneer Tikka', qty: 1, price: 320 },
+                        { name: 'Butter Naan', qty: 2, price: 90 },
+                      ],
+                      total: 500,
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    };
+
+    const res = await agent
+      .post('/api/expenses/scan')
+      .send({ pages: ['1 Paneer Tikka 320.00', '2 Butter Naan 90.00\nGrand Total 500.00'] });
+
+    expect(res.status).toBe(200);
+    // One request carrying both photos, marked and in order — the model can
+    // only spot the overlap between two shots if it sees them together.
+    expect(sent.contents).toHaveLength(1);
+    const prompt = sent.contents[0].parts[0].text;
+    expect(prompt).toContain('--- PHOTO 1 of 2 ---');
+    expect(prompt).toContain('--- PHOTO 2 of 2 ---');
+    // And it is told what overlapping shots mean, or it bills the seam twice.
+    expect(prompt).toContain('SEVERAL PHOTOS OF ONE BILL');
+    expect(prompt.indexOf('Paneer Tikka')).toBeLessThan(prompt.indexOf('Butter Naan'));
+    // One list of dishes back, not one per photo.
+    expect(res.body.scan.items).toHaveLength(2);
+  });
+
+  it('does not talk about photo numbers when there is only one photo', async () => {
+    const { agent } = await signUp('Aditi');
+    let sent;
+    process.env.GEMINI_API_KEY = 'test-key';
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"items":[{"name":"X","price":1}]}' }] } }],
+        }),
+      };
+    };
+
+    await agent.post('/api/expenses/scan').send({ pages: ['1 Paneer Tikka 320.00'] });
+    const prompt = sent.contents[0].parts[0].text;
+    expect(prompt).toContain('--- BILL TEXT ---');
+    expect(prompt).not.toContain('--- PHOTO');
+    // The overlap rules are a page of instructions about a situation this scan
+    // is not in — and tokens out of a small free allowance.
+    expect(prompt).not.toContain('SEVERAL PHOTOS OF ONE BILL');
+  });
+
+  it('refuses more photos than any bill needs', async () => {
+    const { agent } = await signUp('Aditi');
+    const res = await agent
+      .post('/api/expenses/scan')
+      .send({ pages: Array.from({ length: 9 }, (_, i) => `Photo ${i} 100.00`) });
+    expect(res.status).toBe(400);
+  });
+
+  it('sends the bill text to the model, and never a photograph', async () => {
+    const { agent } = await signUp('Aditi');
+    process.env.GEMINI_API_KEY = 'test-key';
+    let sent;
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"items":[{"name":"X","price":1}]}' }] } }],
+        }),
+      };
+    };
+
+    await agent.post('/api/expenses/scan').send(body);
+    const parts = sent.contents[0].parts;
+    // No inlineData anywhere: the image stays on the device, which is half the
+    // reason for doing OCR in the browser.
+    expect(parts.some((p) => p.inlineData)).toBe(false);
+    expect(parts[0].text).toContain('Paneer Tikka');
+  });
+
+  it('never sends the API key in the URL', async () => {
+    const { agent } = await signUp('Aditi');
+    process.env.GEMINI_API_KEY = 'super-secret';
+    let seen;
+    globalThis.fetch = async (url, init) => {
+      seen = { url: String(url), init };
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"items":[{"name":"X","price":1}]}' }] } }],
+        }),
+      };
+    };
+
+    await agent.post('/api/expenses/scan').send(body);
+    expect(seen.url).not.toContain('super-secret');
+    expect(seen.init.headers['x-goog-api-key']).toBe('super-secret');
   });
 });
 

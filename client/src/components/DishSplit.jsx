@@ -1,7 +1,9 @@
+import { useEffect, useRef } from 'react';
 import { formatMoney } from '@shared/money.js';
 import { itemTotalCents } from '@shared/splitEngine.js';
 import { Avatar } from './ui.jsx';
 import { MoneyInput } from './MoneyInput.jsx';
+import { ScanBillButton } from './ScanBillButton.jsx';
 
 const blankItem = () => ({ key: crypto.randomUUID(), name: '', priceCents: 0, qty: 1, sharedBy: [] });
 
@@ -10,8 +12,21 @@ export { blankItem };
 /**
  * The dish-wise editor: one row per dish, with avatar chips for who shared it,
  * then the tax/tip/discount that get spread proportionally over those dishes.
+ *
+ * A scanned bill lands straight in here rather than in a separate review step —
+ * this form *is* the review, and it already shows a running subtotal and warns
+ * about a dish nobody is assigned to.
  */
-export function DishSplit({ items, setItems, extras, setExtras, people }) {
+export function DishSplit({
+  items,
+  setItems,
+  extras,
+  setExtras,
+  people,
+  onScanned,
+  scan,
+  onDismissScan,
+}) {
   const update = (key, patch) =>
     setItems(items.map((item) => (item.key === key ? { ...item, ...patch } : item)));
 
@@ -32,8 +47,110 @@ export function DishSplit({ items, setItems, extras, setExtras, people }) {
     }
   }, 0);
 
+  // What the bill said versus what the rows currently add up to. Recomputed as
+  // you edit, so fixing a misread dish makes the warning go away by itself.
+  const printedTotal = scan?.printedCents ?? null;
+  const currentTotal =
+    subtotal + extras.taxCents + extras.tipCents + extras.otherCents -
+    (extras.discountMode === 'percent'
+      ? Math.round((subtotal * (extras.discountBps ?? 0)) / 10000)
+      : extras.discountCents);
+  const gapCents = printedTotal == null ? 0 : printedTotal - currentTotal;
+
+  /*
+   * Bring the result into view once a scan lands.
+   *
+   * The dish rows and the reconciliation warning appear well below the fold on
+   * a phone — the form starts at Description and the split tabs are already a
+   * screenful down. Leaving the user looking at an unchanged screen makes the
+   * scan seem to have done nothing, and hides the one warning that matters.
+   */
+  const scanPanel = useRef(null);
+  useEffect(() => {
+    if (scan) scanPanel.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [scan]);
+
   return (
     <div className="space-y-3">
+      {/* The button and the scan notes scroll into view together. Landing on
+          the notes alone pushes the button off the top of the screen, and
+          "add the other half of the bill" is the next thing someone with a
+          long receipt needs to reach. */}
+      <div ref={scanPanel} className="space-y-3">
+        {onScanned && <ScanBillButton onScanned={onScanned} scanned={Boolean(scan)} />}
+
+        {scan && (
+          <div className="space-y-2 rounded-xl border border-line bg-sunken p-3">
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-xs font-semibold text-fg">
+                {scan.pageCount > 1 ? `Filled in from your ${scan.pageCount} photos` : 'Filled in from your photo'}
+                <span className="ml-1.5 font-normal text-fg-subtle">
+                  {scan.provider === 'gemini'
+                    ? 'read on your device, tidied up online'
+                    : // Why the rougher path was used. Temporary reasons are worth
+                      // saying, or a poor result looks like the only one this app
+                      // is capable of.
+                      {
+                        upstream: 'read on your device — the online tidy-up was busy',
+                        quota: "read on your device — today's free online tidy-ups are used up",
+                      }[scan.reason] ?? 'read on your device'}
+                </span>
+              </p>
+              <button
+                type="button"
+                onClick={onDismissScan}
+                className="icon-btn shrink-0 p-1 text-fg-subtle hover:bg-hover hover:text-fg"
+                aria-label="Dismiss scan notes"
+              >
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Every dish starts shared by everyone, so the common case is one
+                tap. The flip side is that a dish you forget to untick is charged
+                to people who didn't eat it — worth saying out loud. */}
+            <p className="text-xs text-fg-muted">
+              Every dish is ticked for everyone. <b>Untick anyone who didn&apos;t have one</b>,
+              and check the prices — a scan gets things wrong sometimes.
+            </p>
+
+            {printedTotal != null && (
+              <p
+                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium ${
+                  gapCents === 0 ? 'bg-accent-soft text-accent-soft-fg' : 'bg-warn-soft text-warn-fg'
+                }`}
+              >
+                {gapCents === 0 ? (
+                  <>Adds up to the {formatMoney(printedTotal)} printed on the bill ✓</>
+                ) : (
+                  <>
+                    The bill says {formatMoney(printedTotal)} but these rows come to{' '}
+                    {formatMoney(currentTotal)} —{' '}
+                    {gapCents > 0
+                      ? `${formatMoney(gapCents)} short, so a dish or a charge was probably missed.`
+                      : `${formatMoney(-gapCents)} over, so something was probably read twice.`}
+                  </>
+                )}
+              </p>
+            )}
+
+            {/* No printed total means the safety net is missing, and on a bill
+                photographed in pieces that usually means the foot of it hasn't
+                been captured yet. Saying so is what makes the missing green tick
+                legible rather than just absent. */}
+            {printedTotal == null && (
+              <p className="rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs font-medium text-warn-fg">
+                No final total on {scan.pageCount > 1 ? 'these photos' : 'this photo'}, so there is
+                nothing to check the dishes against. Add a photo of the foot of the bill if it was
+                cut off.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="space-y-2">
         {items.map((item, index) => {
           const everyone = allIds.length > 0 && allIds.every((id) => item.sharedBy.includes(id));
@@ -44,9 +161,13 @@ export function DishSplit({ items, setItems, extras, setExtras, people }) {
                 item.sharedBy.length === 0 ? 'border-warn-line bg-warn-soft' : 'border-line'
               }`}
             >
+              {/* The name takes a whole row on a phone. Sharing one line with
+                  the quantity, the price and the delete button leaves it about
+                  90px wide, which shows "Pane" for "Paneer Tikka" — fine when
+                  you typed it, useless when you're checking what a scan read. */}
               <div className="flex flex-wrap items-center gap-2">
                 <input
-                  className="input min-w-0 flex-1"
+                  className="input min-w-0 flex-1 basis-full sm:basis-auto"
                   placeholder={`Dish ${index + 1}`}
                   value={item.name}
                   onChange={(e) => update(item.key, { name: e.target.value })}
@@ -62,7 +183,7 @@ export function DishSplit({ items, setItems, extras, setExtras, people }) {
                   }
                 />
                 <MoneyInput
-                  className="w-28"
+                  className="w-28 min-w-0 flex-1 sm:flex-none"
                   placeholder="Price"
                   valueCents={item.priceCents}
                   onChangeCents={(cents) => update(item.key, { priceCents: cents })}

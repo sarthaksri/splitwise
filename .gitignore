@@ -6,3 +6,6 @@ dist/
 .DS_Store
 .vite/
 coverage/
+# Tesseract caches its language data next to the process that ran it. The
+# browser fetches its own copy; a 5MB blob has no business in the repo.
+*.traineddata

@@ -84,6 +84,10 @@ export function createApp() {
     }),
   );
 
+  // 256kb everywhere: a JSON expense is a few hundred bytes and a scanned
+  // bill's text a few thousand, so nothing legitimate comes close. Receipt
+  // photos are read in the browser and never uploaded, which is what let this
+  // go back to a single small limit.
   app.use(express.json({ limit: '256kb' }));
   app.use(cookieParser());
   if (process.env.NODE_ENV !== 'test') app.use(morgan('dev'));
